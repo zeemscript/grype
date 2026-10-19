@@ -2,13 +2,14 @@ package version
 
 import (
 	"fmt"
-	"math"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
 )
+
+var _ Comparator = (*rpmVersion)(nil)
 
 type rpmVersion struct {
 	epoch   *int
@@ -17,23 +18,14 @@ type rpmVersion struct {
 }
 
 func newRpmVersion(raw string) (rpmVersion, error) {
-	fields := strings.SplitN(raw, ":", 2)
-
-	var epoch *int
-	var remaining = raw
-	if len(fields) > 1 {
-		// there is an epoch
-		epochStr := strings.TrimLeft(fields[0], " ")
-		epochInt, err := strconv.Atoi(epochStr)
-		if err != nil {
-			return rpmVersion{}, fmt.Errorf("unable to parse epoch (%s): %w", epochStr, err)
-		}
-		epoch = &epochInt
-		remaining = fields[1]
+	epoch, remainingVersion, err := splitEpochFromVersion(raw)
+	if err != nil {
+		return rpmVersion{}, err
 	}
 
-	fields = strings.SplitN(remaining, "-", 2)
-	var ver = fields[0]
+	fields := strings.SplitN(remainingVersion, "-", 2)
+	version := fields[0]
+
 	var release string
 	if len(fields) > 1 {
 		// there is a release
@@ -42,34 +34,97 @@ func newRpmVersion(raw string) (rpmVersion, error) {
 
 	return rpmVersion{
 		epoch:   epoch,
-		version: ver,
+		version: version,
 		release: release,
 	}, nil
 }
 
-func (v *rpmVersion) Compare(other *Version) (int, error) {
-	if other.Format != RpmFormat {
-		return -1, fmt.Errorf("unable to compare rpm to given format: %s", other.Format)
-	}
-	if other.rich.rpmVer == nil {
-		return -1, fmt.Errorf("given empty rpmVersion object")
+func (v rpmVersion) Compare(other *Version) (int, error) {
+	if other == nil {
+		return -1, ErrNoVersionProvided
 	}
 
-	return other.rich.rpmVer.compare(*v), nil
+	o, err := newRpmVersion(other.Raw)
+	if err != nil {
+		return 0, err
+	}
+
+	return v.compare(o), nil
+}
+
+// CompareWithConfig compares two RPM versions using the provided comparison
+// configuration. The config controls behavior for missing epochs:
+//   - "zero" strategy: missing epochs are treated as 0
+//   - "auto" strategy: missing epochs in the package version match the constraint's epoch
+//
+// Returns:
+//
+//	-1 if v < other
+//	 0 if v == other
+//	 1 if v > other
+//
+// Only the package version's (v) missing epoch is handled by the auto strategy. If the
+// constraint (other) is missing an epoch, it is always treated as 0 per RPM specification.
+func (v rpmVersion) CompareWithConfig(other *Version, cfg ComparisonConfig) (int, error) {
+	if other == nil {
+		return -1, ErrNoVersionProvided
+	}
+
+	o, err := newRpmVersion(other.Raw)
+	if err != nil {
+		return 0, err
+	}
+
+	return v.compareWithConfig(o, cfg), nil
+}
+
+func (v rpmVersion) compareWithConfig(v2 rpmVersion, cfg ComparisonConfig) int {
+	if reflect.DeepEqual(v, v2) {
+		return 0
+	}
+
+	// Handle epoch comparison based on strategy
+	switch cfg.MissingEpochStrategy {
+	case MissingEpochStrategyAuto:
+		// If v (package) is missing epoch but v2 (constraint) has one, temporarily use v2's epoch for v
+		if !epochIsPresent(v.epoch) && epochIsPresent(v2.epoch) {
+			vWithEpoch := v
+			vWithEpoch.epoch = v2.epoch
+			return vWithEpoch.compare(v2)
+		}
+	case MissingEpochStrategyZero:
+		// If v (package) is missing epoch, treat it as 0
+		// This differs from the default compare() behavior which ignores one-sided epochs
+		if !epochIsPresent(v.epoch) && epochIsPresent(v2.epoch) {
+			vWithEpoch := v
+			zero := 0
+			vWithEpoch.epoch = &zero
+			return vWithEpoch.compare(v2)
+		}
+	}
+
+	return v.compare(v2)
 }
 
 // Compare returns 0 if v == v2, -1 if v < v2, and +1 if v > v2.
+// This a pragmatic adaptation of comparison for the messy data
+// encountered in vuln scanning. If epochs are NOT present and explicit
+// (e.g. >= 0) in both versions then they are ignored for the comparison.
+// For a rpm spec-compliant comparison, see strictCompare() instead
 func (v rpmVersion) compare(v2 rpmVersion) int {
 	if reflect.DeepEqual(v, v2) {
 		return 0
 	}
 
-	// ignore the epoch if either is missing an epoch
-	if v.epoch != nil && v2.epoch != nil {
-		if *v.epoch > *v2.epoch {
-			return 1
-		} else if *v.epoch < *v2.epoch {
-			return -1
+	// Only compare epochs if both are present and explicit. This is technically
+	// against what RedHat says to do with missing epoch (which is to assume a 0 epoch).
+	// However, since we may be dealing with upstream data sources where there is an epoch
+	// for a package but the value was stripped, the best we can do is to compare only the
+	// version values without the epoch values.
+	if epochIsPresent(v.epoch) && epochIsPresent(v2.epoch) {
+		epochResult := compareEpochs(*v.epoch, *v2.epoch)
+		if epochResult != 0 {
+			return epochResult
 		}
 	}
 
@@ -81,11 +136,25 @@ func (v rpmVersion) compare(v2 rpmVersion) int {
 	return compareRpmVersions(v.release, v2.release)
 }
 
+func epochIsPresent(epoch *int) bool {
+	return epoch != nil
+}
+
+// Epoch comparison, standard int comparison for sorting
+func compareEpochs(e1 int, e2 int) int {
+	switch {
+	case e1 > e2:
+		return 1
+	case e1 < e2:
+		return -1
+	default:
+		return 0
+	}
+}
+
 func (v rpmVersion) String() string {
 	version := ""
-	if v.epoch == nil {
-		version += "none:"
-	} else if *v.epoch > 0 {
+	if v.epoch != nil {
 		version += fmt.Sprintf("%d:", *v.epoch)
 	}
 	version += v.version
@@ -96,6 +165,32 @@ func (v rpmVersion) String() string {
 	return version
 }
 
+func splitEpochFromVersion(rawVersion string) (*int, string, error) {
+	fields := strings.SplitN(rawVersion, ":", 2)
+
+	// When the epoch is not included, should be considered to be 0 during
+	// comparisons (see https://github.com/rpm-software-management/rpm/issues/450).
+	// But, often the inclusion of the epoch in vuln databases or source RPM
+	// filenames is not consistent so, represent a missing epoch as nil. This allows
+	// the comparison logic itself to determine if it should use a zero or another
+	// value which supports more flexible comparison options because the version
+	// creation is not lossy
+
+	if len(fields) == 1 {
+		return nil, rawVersion, nil
+	}
+
+	// there is an epoch
+	epochStr := strings.TrimLeft(fields[0], " ")
+
+	epoch, err := strconv.Atoi(epochStr)
+	if err != nil {
+		return nil, "", fmt.Errorf("unable to parse epoch (%s): %w", epochStr, err)
+	}
+
+	return &epoch, fields[1], nil
+}
+
 // compareRpmVersions compares two version or release strings without the epoch.
 // Source: https://github.com/cavaliercoder/go-rpm/blob/master/version.go
 //
@@ -103,7 +198,7 @@ func (v rpmVersion) String() string {
 // https://github.com/rpm-software-management/rpm/blob/master/lib/rpmvercmp.c#L16
 var alphanumPattern = regexp.MustCompile("([a-zA-Z]+)|([0-9]+)|(~)")
 
-// nolint:funlen,gocognit
+//nolint:funlen,gocognit,dupl // see comparePacmanVersions for why we keep these decoupled
 func compareRpmVersions(a, b string) int {
 	// shortcut for equality
 	if a == b {
@@ -113,10 +208,11 @@ func compareRpmVersions(a, b string) int {
 	// get alpha/numeric segments
 	segsa := alphanumPattern.FindAllString(a, -1)
 	segsb := alphanumPattern.FindAllString(b, -1)
-	segs := int(math.Min(float64(len(segsa)), float64(len(segsb))))
+	maxSegs := max(len(segsa), len(segsb))
+	minSegs := min(len(segsa), len(segsb))
 
 	// compare each segment
-	for i := 0; i < segs; i++ {
+	for i := range minSegs {
 		a := segsa[i]
 		b := segsb[i]
 
@@ -166,10 +262,25 @@ func compareRpmVersions(a, b string) int {
 	}
 
 	// If there is a tilde in a segment past the min number of segments, find it.
-	if len(segsa) > segs && []rune(segsa[segs])[0] == '~' {
+	if len(segsa) > minSegs && []rune(segsa[minSegs])[0] == '~' {
 		return -1
-	} else if len(segsb) > segs && []rune(segsb[segs])[0] == '~' {
+	} else if len(segsb) > minSegs && []rune(segsb[minSegs])[0] == '~' {
 		return 1
+	}
+	// are the remaining segments 0s?
+	segaAll0s := true
+	segbAll0s := true
+	for i := minSegs; i < maxSegs; i++ {
+		if i < len(segsa) && segsa[i] != "0" {
+			segaAll0s = false
+		}
+		if i < len(segsb) && segsb[i] != "0" {
+			segbAll0s = false
+		}
+	}
+
+	if segaAll0s && segbAll0s {
+		return 0
 	}
 
 	// whoever has the most segments wins

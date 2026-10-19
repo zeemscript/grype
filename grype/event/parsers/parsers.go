@@ -3,25 +3,24 @@ package parsers
 import (
 	"fmt"
 
-	"github.com/anchore/grype/grype/matcher"
-	"github.com/anchore/grype/grype/presenter"
+	"github.com/wagoodman/go-partybus"
 	"github.com/wagoodman/go-progress"
 
 	"github.com/anchore/grype/grype/event"
-	"github.com/wagoodman/go-partybus"
+	"github.com/anchore/grype/grype/event/monitor"
 )
 
 type ErrBadPayload struct {
 	Type  partybus.EventType
 	Field string
-	Value interface{}
+	Value any
 }
 
 func (e *ErrBadPayload) Error() string {
 	return fmt.Sprintf("event='%s' has bad event payload field='%v': '%+v'", string(e.Type), e.Field, e.Value)
 }
 
-func newPayloadErr(t partybus.EventType, field string, value interface{}) error {
+func newPayloadErr(t partybus.EventType, field string, value any) error {
 	return &ErrBadPayload{
 		Type:  t,
 		Field: field,
@@ -34,19 +33,6 @@ func checkEventType(actual, expected partybus.EventType) error {
 		return newPayloadErr(expected, "Type", actual)
 	}
 	return nil
-}
-
-func ParseAppUpdateAvailable(e partybus.Event) (string, error) {
-	if err := checkEventType(e.Type, event.AppUpdateAvailable); err != nil {
-		return "", err
-	}
-
-	newVersion, ok := e.Value.(string)
-	if !ok {
-		return "", newPayloadErr(e.Type, "Value", e.Value)
-	}
-
-	return newVersion, nil
 }
 
 func ParseUpdateVulnerabilityDatabase(e partybus.Event) (progress.StagedProgressable, error) {
@@ -62,28 +48,84 @@ func ParseUpdateVulnerabilityDatabase(e partybus.Event) (progress.StagedProgress
 	return prog, nil
 }
 
-func ParseVulnerabilityScanningStarted(e partybus.Event) (*matcher.Monitor, error) {
+func ParseVulnerabilityScanningStarted(e partybus.Event) (*monitor.Matching, error) {
 	if err := checkEventType(e.Type, event.VulnerabilityScanningStarted); err != nil {
 		return nil, err
 	}
 
-	monitor, ok := e.Value.(matcher.Monitor)
+	mon, ok := e.Value.(monitor.Matching)
 	if !ok {
 		return nil, newPayloadErr(e.Type, "Value", e.Value)
 	}
 
-	return &monitor, nil
+	return &mon, nil
 }
 
-func ParseVulnerabilityScanningFinished(e partybus.Event) (presenter.Presenter, error) {
-	if err := checkEventType(e.Type, event.VulnerabilityScanningFinished); err != nil {
+func ParseDatabaseDiffingStarted(e partybus.Event) (*monitor.DBDiff, error) {
+	if err := checkEventType(e.Type, event.DatabaseDiffingStarted); err != nil {
 		return nil, err
 	}
 
-	pres, ok := e.Value.(presenter.Presenter)
+	mon, ok := e.Value.(monitor.DBDiff)
 	if !ok {
 		return nil, newPayloadErr(e.Type, "Value", e.Value)
 	}
 
-	return pres, nil
+	return &mon, nil
+}
+
+type UpdateCheck struct {
+	New     string
+	Current string
+}
+
+func ParseCLIAppUpdateAvailable(e partybus.Event) (*UpdateCheck, error) {
+	if err := checkEventType(e.Type, event.CLIAppUpdateAvailable); err != nil {
+		return nil, err
+	}
+
+	updateCheck, ok := e.Value.(UpdateCheck)
+	if !ok {
+		return nil, newPayloadErr(e.Type, "Value", e.Value)
+	}
+
+	return &updateCheck, nil
+}
+
+func ParseCLIReport(e partybus.Event) (string, string, error) {
+	if err := checkEventType(e.Type, event.CLIReport); err != nil {
+		return "", "", err
+	}
+
+	context, ok := e.Source.(string)
+	if !ok {
+		// this is optional
+		context = ""
+	}
+
+	report, ok := e.Value.(string)
+	if !ok {
+		return "", "", newPayloadErr(e.Type, "Value", e.Value)
+	}
+
+	return context, report, nil
+}
+
+func ParseCLINotification(e partybus.Event) (string, string, error) {
+	if err := checkEventType(e.Type, event.CLINotification); err != nil {
+		return "", "", err
+	}
+
+	context, ok := e.Source.(string)
+	if !ok {
+		// this is optional
+		context = ""
+	}
+
+	notification, ok := e.Value.(string)
+	if !ok {
+		return "", "", newPayloadErr(e.Type, "Value", e.Value)
+	}
+
+	return context, notification, nil
 }

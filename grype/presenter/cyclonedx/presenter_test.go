@@ -3,103 +3,161 @@ package cyclonedx
 import (
 	"bytes"
 	"flag"
-	"regexp"
+	"os"
 	"testing"
 
-	"github.com/anchore/grype/grype/presenter/models"
+	cyclonedxlib "github.com/CycloneDX/cyclonedx-go"
+	"github.com/google/go-cmp/cmp"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/stretchr/testify/require"
 
-	"github.com/anchore/go-testutils"
-	"github.com/anchore/grype/grype/match"
-	"github.com/anchore/grype/grype/pkg"
-	"github.com/anchore/grype/grype/vulnerability"
-	"github.com/anchore/stereoscope/pkg/imagetest"
-	syftPkg "github.com/anchore/syft/syft/pkg"
-	"github.com/anchore/syft/syft/source"
-	"github.com/sergi/go-diff/diffmatchpatch"
+	"github.com/anchore/grype/grype/presenter/internal"
+	"github.com/anchore/grype/grype/presenter/models"
+	"github.com/anchore/grype/internal/testutils"
+	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/sbom"
 )
 
-var update = flag.Bool("update", false, "update the *.golden files for json presenters")
+var update = flag.Bool("update", false, "update the *.golden files for cyclonedx presenters")
 
-func createResults() (match.Matches, []pkg.Package) {
-	// the catalog is needed to assign the package IDs
-	catalog := syftPkg.NewCatalog(
-		syftPkg.Package{
-			Name:    "package-1",
-			Version: "1.0.1",
-			Type:    syftPkg.DebPkg,
+func compileCycloneDXSchema(t *testing.T) *jsonschema.Schema {
+	t.Helper()
+
+	c := jsonschema.NewCompiler()
+
+	// the CycloneDX schema references these sub-schemas by URL; pre-load them from vendored files
+	// so the compiler doesn't try to fetch from the network
+	for _, sub := range []struct {
+		url  string
+		file string
+	}{
+		{"http://cyclonedx.org/schema/jsf-0.82.schema.json", "testdata/jsf-0.82.schema.json"},
+		{"http://cyclonedx.org/schema/spdx.schema.json", "testdata/spdx.schema.json"},
+	} {
+		f, err := os.Open(sub.file)
+		require.NoError(t, err)
+		defer f.Close()
+
+		doc, err := jsonschema.UnmarshalJSON(f)
+		require.NoError(t, err)
+
+		require.NoError(t, c.AddResource(sub.url, doc))
+	}
+
+	sch, err := c.Compile("testdata/bom-1.6.schema.json")
+	require.NoError(t, err)
+	return sch
+}
+
+func Test_CycloneDX_Valid(t *testing.T) {
+	sch := compileCycloneDXSchema(t)
+
+	tests := []struct {
+		name   string
+		format cyclonedxlib.BOMFileFormat
+		scheme internal.SyftSource
+	}{
+		{
+			name:   "json directory",
+			format: cyclonedxlib.BOMFileFormatJSON,
+			scheme: internal.DirectorySource,
 		},
-		syftPkg.Package{
-			Name:    "package-2",
-			Version: "2.0.1",
-			Type:    syftPkg.DebPkg,
-			Licenses: []string{
-				"MIT",
-				"Apache-v2",
-			},
+		{
+			name:   "json image",
+			format: cyclonedxlib.BOMFileFormatJSON,
+			scheme: internal.ImageSource,
+		},
+		{
+			name:   "xml directory",
+			format: cyclonedxlib.BOMFileFormatXML,
+			scheme: internal.DirectorySource,
+		},
+		{
+			name:   "xml image",
+			format: cyclonedxlib.BOMFileFormatXML,
+			scheme: internal.ImageSource,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buffer bytes.Buffer
+
+			pb := internal.GeneratePresenterConfig(t, tc.scheme)
+
+			var pres *Presenter
+			switch tc.format {
+			case cyclonedxlib.BOMFileFormatJSON:
+				pres = NewJSONPresenter(pb)
+			case cyclonedxlib.BOMFileFormatXML:
+				pres = NewXMLPresenter(pb)
+			default:
+				t.Fatalf("invalid format: %v", tc.format)
+			}
+
+			err := pres.Present(&buffer)
+			require.NoError(t, err)
+
+			var jsonBytes []byte
+			if tc.format == cyclonedxlib.BOMFileFormatXML {
+				// decode XML into a BOM, then re-encode as JSON so we can validate against the JSON schema;
+				// bomFormat is a JSON-only field (xml:"-"), so we must set it after decoding
+				var bom cyclonedxlib.BOM
+				err = cyclonedxlib.NewBOMDecoder(bytes.NewReader(buffer.Bytes()), cyclonedxlib.BOMFileFormatXML).Decode(&bom)
+				require.NoError(t, err, "CycloneDX XML output could not be decoded")
+
+				bom.BOMFormat = cyclonedxlib.BOMFormat
+
+				var jsonBuf bytes.Buffer
+				err = cyclonedxlib.NewBOMEncoder(&jsonBuf, cyclonedxlib.BOMFileFormatJSON).Encode(&bom)
+				require.NoError(t, err, "could not re-encode BOM as JSON")
+				jsonBytes = jsonBuf.Bytes()
+			} else {
+				jsonBytes = buffer.Bytes()
+			}
+
+			inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(jsonBytes))
+			require.NoError(t, err)
+
+			err = sch.Validate(inst)
+			require.NoError(t, err, "CycloneDX %s output does not conform to schema", tc.name)
 		})
+	}
+}
 
-	packages := pkg.FromCatalog(catalog)
-
-	var pkg1 = packages[0]
-	var pkg2 = packages[1]
-
-	var match1 = match.Match{
-		Type: match.ExactDirectMatch,
-		Vulnerability: vulnerability.Vulnerability{
-			ID:        "CVE-1999-0001",
-			Namespace: "source-1",
-		},
-		Package: pkg1,
-		MatchDetails: []match.Details{
-			{
-				Matcher: match.DpkgMatcher,
-			},
+func Test_noTypedNils(t *testing.T) {
+	s := sbom.SBOM{
+		Artifacts: sbom.Artifacts{
+			FileMetadata: map[file.Coordinates]file.Metadata{},
+			FileDigests:  map[file.Coordinates][]file.Digest{},
 		},
 	}
-
-	var match2 = match.Match{
-		Type: match.ExactIndirectMatch,
-		Vulnerability: vulnerability.Vulnerability{
-			ID:        "CVE-1999-0002",
-			Namespace: "source-2",
-		},
-		Package: pkg2,
-		MatchDetails: []match.Details{
-			{
-				Matcher: match.DpkgMatcher,
-				SearchedBy: map[string]interface{}{
-					"some": "key",
-				},
-			},
-		},
+	c := file.NewCoordinates("/file", "123")
+	s.Artifacts.FileMetadata[c] = file.Metadata{
+		Path: "/file",
 	}
+	s.Artifacts.FileDigests[c] = []file.Digest{}
 
-	matches := match.NewMatches()
-
-	matches.Add(pkg1, match1, match2)
-
-	return matches, packages
+	p := NewJSONPresenter(models.PresenterConfig{
+		SBOM:   &s,
+		Pretty: false,
+	})
+	contents := bytes.Buffer{}
+	err := p.Present(&contents)
+	require.NoError(t, err)
+	require.NotContains(t, contents.String(), "null")
 }
 
 func TestCycloneDxPresenterImage(t *testing.T) {
 	var buffer bytes.Buffer
 
-	matches, packages := createResults()
+	pb := internal.GeneratePresenterConfig(t, internal.ImageSource)
 
-	img := imagetest.GetFixtureImage(t, "docker-archive", "image-simple")
-	s, err := source.NewFromImage(img, "user-input")
-
-	// This accounts for the non-deterministic digest value that we end up with when
-	// we build a container image dynamically during testing. Ultimately, we should
-	// use a golden image as a test fixture in place of building this image during
-	// testing. At that time, this line will no longer be necessary.
-	//
-	// This value is sourced from the "version" node in "./test-fixtures/snapshot/TestCycloneDxImgsPresenter.golden"
-	s.Metadata.ImageMetadata.ManifestDigest = "sha256:2731251dc34951c0e50fcc643b4c5f74922dad1a5d98f302b504cf46cd5d9368"
-
-	pres := NewPresenter(matches, packages, &s.Metadata, models.NewMetadataMock())
+	pres := NewJSONPresenter(pb)
 	// run presenter
-	err = pres.Present(&buffer)
+	err := pres.Present(&buffer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,30 +170,23 @@ func TestCycloneDxPresenterImage(t *testing.T) {
 	var expected = testutils.GetGoldenFileContents(t)
 
 	// remove dynamic values, which are tested independently
-	actual = redact(actual)
-	expected = redact(expected)
+	actual = internal.Redact(actual)
+	expected = internal.Redact(expected)
 
-	if !bytes.Equal(expected, actual) {
-		dmp := diffmatchpatch.New()
-		diffs := dmp.DiffMain(string(expected), string(actual), true)
-		t.Errorf("mismatched output:\n%s", dmp.DiffPrettyText(diffs))
+	if d := cmp.Diff(string(expected), string(actual)); d != "" {
+		t.Fatalf("diff: %s", d)
 	}
-
 }
 
 func TestCycloneDxPresenterDir(t *testing.T) {
 	var buffer bytes.Buffer
-	matches, packages := createResults()
 
-	s, err := source.NewFromDirectory("/some/path")
-	if err != nil {
-		t.Fatal(err)
-	}
+	pb := internal.GeneratePresenterConfig(t, internal.DirectorySource)
 
-	pres := NewPresenter(matches, packages, &s.Metadata, models.NewMetadataMock())
+	pres := NewJSONPresenter(pb)
 
 	// run presenter
-	err = pres.Present(&buffer)
+	err := pres.Present(&buffer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,24 +199,10 @@ func TestCycloneDxPresenterDir(t *testing.T) {
 	var expected = testutils.GetGoldenFileContents(t)
 
 	// remove dynamic values, which are tested independently
-	actual = redact(actual)
-	expected = redact(expected)
+	actual = internal.Redact(actual)
+	expected = internal.Redact(expected)
 
-	if !bytes.Equal(expected, actual) {
-		dmp := diffmatchpatch.New()
-		diffs := dmp.DiffMain(string(expected), string(actual), true)
-		t.Errorf("mismatched output:\n%s", dmp.DiffPrettyText(diffs))
+	if d := cmp.Diff(string(expected), string(actual)); d != "" {
+		t.Fatalf("diff: %s", d)
 	}
-
-}
-
-func redact(s []byte) []byte {
-	serialPattern := regexp.MustCompile(`serialNumber="[a-zA-Z0-9\-:]+"`)
-	refPattern := regexp.MustCompile(`ref="[a-zA-Z0-9\-:]+"`)
-	rfc3339Pattern := regexp.MustCompile(`([0-9]+)-(0[1-9]|1[012])-(0[1-9]|[12][0-9]|3[01])[Tt]([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9]|60)(\.[0-9]+)?(([Zz])|([\+|\-]([01][0-9]|2[0-3]):[0-5][0-9]))`)
-
-	for _, pattern := range []*regexp.Regexp{serialPattern, rfc3339Pattern, refPattern} {
-		s = pattern.ReplaceAll(s, []byte("redacted"))
-	}
-	return s
 }

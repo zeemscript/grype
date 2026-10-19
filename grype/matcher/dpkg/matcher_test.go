@@ -3,53 +3,141 @@ package dpkg
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-
 	"github.com/anchore/grype/grype/match"
-	"github.com/anchore/grype/grype/pkg"
-	"github.com/anchore/grype/internal"
-	"github.com/anchore/syft/syft/distro"
+	"github.com/anchore/grype/internal/dbtest"
 	syftPkg "github.com/anchore/syft/syft/pkg"
 )
 
-func TestMatcherDpkg_matchBySourceIndirection(t *testing.T) {
-	matcher := Matcher{}
-	p := pkg.Package{
-		Name:    "neutron",
-		Version: "2014.1.3-6",
-		Type:    syftPkg.DebPkg,
-		Metadata: pkg.DpkgMetadata{
-			Source: "neutron-devel",
+func TestMatcherDpkg_DirectMatch(t *testing.T) {
+	dbtest.SharedDBs(t, "all").
+		SelectOnly("debian:11/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+
+			p := dbtest.NewPackage("openssl", "1.1.1k-1", syftPkg.DebPkg). // vulnerable (< 1.1.1w-0+deb11u2)
+											WithDistro(dbtest.Debian11).
+											Build()
+
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactDirectMatch).
+				AsDistroSearch()
+		})
+}
+
+func TestMatcherDpkg_IndirectMatch(t *testing.T) {
+	dbtest.SharedDBs(t, "all").
+		SelectOnly("debian:11/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+
+			// binary package libssl3 with upstream openssl
+			p := dbtest.NewPackage("libssl3", "1.1.1k-1", syftPkg.DebPkg). // vulnerable
+											WithDistro(dbtest.Debian11).
+											WithUpstream("openssl", "").
+											Build()
+
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactIndirectMatch).
+				AsDistroSearch()
+		})
+}
+
+func TestMatcherDpkg_CPEFallbackWhenEOL(t *testing.T) {
+	p := dbtest.NewPackage("openssl", "1.1.1k", syftPkg.DebPkg). // vulnerable
+									WithDistro(dbtest.Debian8).
+									WithCPE("cpe:2.3:a:openssl:openssl:1.1.1k:*:*:*:*:*:*:*").
+									Build()
+
+	tests := []struct {
+		name             string
+		useCPEsForEOL    bool
+		expectCPEMatches bool
+	}{
+		{
+			name:             "CPE fallback enabled and distro is EOL",
+			useCPEsForEOL:    true,
+			expectCPEMatches: true,
+		},
+		{
+			name:             "CPE fallback disabled and distro is EOL",
+			useCPEsForEOL:    false,
+			expectCPEMatches: false,
 		},
 	}
 
-	d, err := distro.NewDistro(distro.Debian, "8", "")
-	if err != nil {
-		t.Fatal("could not create distro: ", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// use the local EOL fixture that has Debian 8 EOL date set
+			dbtest.DBs(t, "eol-debian8").Run(func(t *testing.T, db *dbtest.DB) {
+				matcher := NewDpkgMatcher(MatcherConfig{
+					UseCPEsForEOL: tt.useCPEsForEOL,
+				})
+
+				findings := db.Match(t, matcher, p)
+
+				if tt.expectCPEMatches {
+					findings.
+						ContainsVulnerabilities("CVE-2024-0727").
+						SelectMatch("CVE-2024-0727").
+						SelectDetailByType(match.CPEMatch).
+						AsCPESearch().
+						FoundCPEs("cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*")
+				} else {
+					findings.IsEmpty()
+				}
+			})
+		})
+	}
+}
+
+func TestMatcherDpkg_CPEMatchingWhenEnabled(t *testing.T) {
+	// a package from a third-party apt repository: the distro feed has no record for it, only NVD does
+	p := dbtest.NewPackage("vendor-openssl", "1.1.1k", syftPkg.DebPkg). // vulnerable
+										WithDistro(dbtest.Debian12).
+										WithCPE("cpe:2.3:a:openssl:openssl:1.1.1k:*:*:*:*:*:*:*").
+										Build()
+
+	tests := []struct {
+		name             string
+		useCPEs          bool
+		expectCPEMatches bool
+	}{
+		{
+			name:             "CPE matching enabled and distro is not EOL",
+			useCPEs:          true,
+			expectCPEMatches: true,
+		},
+		{
+			name:             "CPE matching disabled and distro is not EOL",
+			useCPEs:          false,
+			expectCPEMatches: false,
+		},
 	}
 
-	store := newMockProvider()
-	actual, err := matcher.matchBySourceIndirection(store, &d, p)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbtest.SharedDBs(t, "all").
+				SelectOnly("CVE-2024-0727").
+				Run(func(t *testing.T, db *dbtest.DB) {
+					matcher := NewDpkgMatcher(MatcherConfig{
+						UseCPEs: tt.useCPEs,
+					})
 
-	assert.Len(t, actual, 2, "unexpected indirect matches count")
+					findings := db.Match(t, matcher, p)
 
-	foundCVEs := internal.NewStringSet()
-	for _, a := range actual {
-		foundCVEs.Add(a.Vulnerability.ID)
-
-		assert.Equal(t, match.ExactIndirectMatch, a.Type, "indirect match not indicated")
-		assert.Equal(t, p.Name, a.Package.Name, "failed to capture original package name")
-		for _, detail := range a.MatchDetails {
-			assert.Equal(t, matcher.Type(), detail.Matcher, "failed to capture matcher type")
-		}
-	}
-
-	for _, id := range []string{"CVE-2014-fake-2", "CVE-2013-fake-3"} {
-		if !foundCVEs.Contains(id) {
-			t.Errorf("missing discovered CVE: %s", id)
-		}
-	}
-	if t.Failed() {
-		t.Logf("discovered CVES: %+v", foundCVEs)
+					if tt.expectCPEMatches {
+						findings.
+							ContainsVulnerabilities("CVE-2024-0727").
+							SelectMatch("CVE-2024-0727").
+							SelectDetailByType(match.CPEMatch).
+							AsCPESearch().
+							FoundCPEs("cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*")
+					} else {
+						findings.IsEmpty()
+					}
+				})
+		})
 	}
 }

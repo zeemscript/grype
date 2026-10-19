@@ -1,42 +1,59 @@
 package version
 
-import (
-	"fmt"
-)
+import "fmt"
 
 type Constraint interface {
 	fmt.Stringer
+	Value() string
+	Format() Format
 	Satisfied(*Version) (bool, error)
 }
 
 func GetConstraint(constStr string, format Format) (Constraint, error) {
+	var c Constraint
+	var err error
+
 	switch format {
+	case ApkFormat:
+		c, err = newGenericConstraint(ApkFormat, constStr)
 	case SemanticFormat:
-		return newSemanticConstraint(constStr)
+		c, err = newGenericConstraint(SemanticFormat, constStr)
+	case BitnamiFormat:
+		c, err = newGenericConstraint(BitnamiFormat, constStr)
+	case GemFormat:
+		c, err = newGenericConstraint(GemFormat, constStr)
 	case DebFormat:
-		return newDebConstraint(constStr)
+		c, err = newGenericConstraint(DebFormat, constStr)
+	case GolangFormat:
+		c, err = newGenericConstraint(GolangFormat, constStr)
+	case MavenFormat:
+		c, err = newGenericConstraint(MavenFormat, constStr)
 	case RpmFormat:
-		return newRpmConstraint(constStr)
+		c, err = newGenericConstraint(RpmFormat, constStr)
 	case PythonFormat:
-		// This is specific to PythonFormat so that it adheres to PEP440 and its odd corner-cases
-		// It is significantly odd enough, that the fuzzyConstraint is the best bet to compare versions.
-		// Although this will work in most cases, some oddities aren't supported, like:
-		// 1.0b2.post345.dev456 which is allowed by the spec. In that case (a dev release of a post release)
-		// the comparator will fail. See https://www.python.org/dev/peps/pep-0440
-		return newFuzzyConstraint(constStr, "python")
+		c, err = newGenericConstraint(PythonFormat, constStr)
 	case KBFormat:
-		return newKBConstraint(constStr)
+		c, err = newKBConstraint(constStr)
+	case PortageFormat:
+		c, err = newGenericConstraint(PortageFormat, constStr)
+	case PacmanFormat:
+		c, err = newGenericConstraint(PacmanFormat, constStr)
+	case JVMFormat:
+		c, err = newGenericConstraint(JVMFormat, constStr)
 	case UnknownFormat:
-		return newFuzzyConstraint(constStr, "unknown")
+		c, err = newFuzzyConstraint(constStr, "unknown")
+	default:
+		return nil, fmt.Errorf("could not find constraint for given format: %s", format)
 	}
-	return nil, fmt.Errorf("could not find constraint for given format: %s", format)
+
+	return c, err
 }
 
 // MustGetConstraint is meant for testing only, do not use within the library
 func MustGetConstraint(constStr string, format Format) Constraint {
-	constraint, err := GetConstraint(constStr, format)
+	c, err := GetConstraint(constStr, format)
 	if err != nil {
 		panic(err)
 	}
-	return constraint
+	return c
 }

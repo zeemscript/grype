@@ -1,49 +1,30 @@
-package json
+package json //nolint:revive
 
 import (
 	"encoding/json"
 	"io"
 
 	"github.com/anchore/grype/grype/presenter/models"
-
-	"github.com/anchore/grype/grype/match"
-	"github.com/anchore/grype/grype/pkg"
-	"github.com/anchore/grype/grype/vulnerability"
 )
 
-// Presenter is a generic struct for holding fields needed for reporting
 type Presenter struct {
-	matches          match.Matches
-	packages         []pkg.Package
-	context          pkg.Context
-	metadataProvider vulnerability.MetadataProvider
-	appConfig        interface{}
-	dbStatus         interface{}
+	document models.Document
+	pretty   bool
 }
 
-// NewPresenter is a *Presenter constructor
-func NewPresenter(matches match.Matches, packages []pkg.Package, context pkg.Context,
-	metadataProvider vulnerability.MetadataProvider, appConfig interface{}, dbStatus interface{}) *Presenter {
+func NewPresenter(pb models.PresenterConfig) *Presenter {
 	return &Presenter{
-		matches:          matches,
-		packages:         packages,
-		metadataProvider: metadataProvider,
-		context:          context,
-		appConfig:        appConfig,
-		dbStatus:         dbStatus,
+		document: pb.Document,
+		pretty:   pb.Pretty,
 	}
 }
 
-// Present creates a JSON-based reporting
-func (pres *Presenter) Present(output io.Writer) error {
-	doc, err := models.NewDocument(pres.packages, pres.context, pres.matches, pres.metadataProvider, pres.appConfig, pres.dbStatus)
-	if err != nil {
-		return err
-	}
-
+func (p *Presenter) Present(output io.Writer) error {
 	enc := json.NewEncoder(output)
 	// prevent > and < from being escaped in the payload
 	enc.SetEscapeHTML(false)
-	enc.SetIndent("", " ")
-	return enc.Encode(&doc)
+	if p.pretty {
+		enc.SetIndent("", " ")
+	}
+	return enc.Encode(&p.document)
 }

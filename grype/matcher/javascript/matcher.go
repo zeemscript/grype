@@ -2,14 +2,24 @@ package javascript
 
 import (
 	"github.com/anchore/grype/grype/match"
-	"github.com/anchore/grype/grype/matcher/common"
+	"github.com/anchore/grype/grype/matcher/internal"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/vulnerability"
-	"github.com/anchore/syft/syft/distro"
 	syftPkg "github.com/anchore/syft/syft/pkg"
 )
 
 type Matcher struct {
+	cfg MatcherConfig
+}
+
+type MatcherConfig struct {
+	UseCPEs bool
+}
+
+func NewJavascriptMatcher(cfg MatcherConfig) *Matcher {
+	return &Matcher{
+		cfg: cfg,
+	}
 }
 
 func (m *Matcher) PackageTypes() []syftPkg.Type {
@@ -20,18 +30,6 @@ func (m *Matcher) Type() match.MatcherType {
 	return match.JavascriptMatcher
 }
 
-func (m *Matcher) Match(store vulnerability.Provider, _ *distro.Distro, p pkg.Package) ([]match.Match, error) {
-	var matches = make([]match.Match, 0)
-	langMatches, err := common.FindMatchesByPackageLanguage(store, p.Language, p, m.Type())
-	if err != nil {
-		return nil, err
-	}
-	matches = append(matches, langMatches...)
-
-	cpeMatches, err := common.FindMatchesByPackageCPE(store, p, m.Type())
-	if err != nil {
-		return nil, err
-	}
-	matches = append(matches, cpeMatches...)
-	return matches, nil
+func (m *Matcher) Match(store vulnerability.Provider, p pkg.Package) ([]match.Match, []match.IgnoreFilter, error) {
+	return internal.MatchPackageByEcosystemAndCPEs(store, p, m.Type(), m.cfg.UseCPEs)
 }

@@ -1,80 +1,76 @@
-release:
-  # If set to auto, will mark the release as not ready for production
-  # in case there is an indicator for this in the tag e.g. v1.0.0-rc1
-  # If set to true, will mark the release as not ready for production.
-  prerelease: auto
+version: 2
 
-  # If set to true, will not auto-publish the release. This is done to allow us to review the changelog before publishing.
-  draft: true
+release:
+  prerelease: auto
+  draft: false
+
+env:
+  # required to support multi architecture docker builds
+  - DOCKER_CLI_EXPERIMENTAL=enabled
+  - CGO_ENABLED=0
 
 builds:
-  - binary: grype
-    id: grype
-    env:
-      - CGO_ENABLED=0
+  - id: linux-build
+    dir: ./cmd/grype
+    binary: grype
+    tags: [containers_image_openpgp, exclude_graphdriver_btrfs]
     goos:
-      # windows not supported yet (due to jotframe)
-      # - windows
       - linux
     goarch:
       - amd64
-    # Set the modified timestamp on the output binary to the git timestamp (to ensure a reproducible build)
-    mod_timestamp: '{{ .CommitTimestamp }}'
-    ldflags: |
+      - arm64
+      - ppc64le
+      - s390x
+    # set the modified timestamp on the output binary to the git timestamp to ensure a reproducible build
+    mod_timestamp: &build-timestamp '{{ .CommitTimestamp }}'
+    ldflags: &build-ldflags |
       -w
       -s
       -extldflags '-static'
-      -X github.com/anchore/grype/internal/version.version={{.Version}}
-      -X github.com/anchore/grype/internal/version.gitCommit={{.Commit}}
-      -X github.com/anchore/grype/internal/version.buildDate={{.Date}}
-      -X github.com/anchore/grype/internal/version.gitTreeState={{.Env.BUILD_GIT_TREE_STATE}}
-  # For more info on this macOS build, see: https://github.com/mitchellh/gon#usage-with-goreleaser
-  - binary: grype
-    id: grype-macos
-    env:
-      - CGO_ENABLED=0
+      -X main.version={{.Version}}
+      -X main.gitCommit={{.Commit}}
+      -X main.buildDate={{.Date}}
+      -X main.gitDescription={{.Summary}}
+
+  - id: darwin-build
+    dir: ./cmd/grype
+    binary: grype
     goos:
       - darwin
     goarch:
       - amd64
-    # Set the modified timestamp on the output binary to the git timestamp (to ensure a reproducible build)
-    mod_timestamp: '{{ .CommitTimestamp }}'
-    ldflags: |
-      -w
-      -s
-      -extldflags '-static'
-      -X github.com/anchore/grype/internal/version.version={{.Version}}
-      -X github.com/anchore/grype/internal/version.gitCommit={{.Commit}}
-      -X github.com/anchore/grype/internal/version.buildDate={{.Date}}
-      -X github.com/anchore/grype/internal/version.gitTreeState={{.Env.BUILD_GIT_TREE_STATE}}
+      - arm64
+    mod_timestamp: *build-timestamp
+    ldflags: *build-ldflags
+    hooks:
+      post:
+        - cmd: .tool/quill sign-and-notarize "{{ .Path }}" --dry-run={{ .IsSnapshot }} --ad-hoc={{ .IsSnapshot }} -vv
+          env:
+            - QUILL_LOG_FILE=/tmp/quill-{{ .Target }}.log
+
+  - id: windows-build
+    dir: ./cmd/grype
+    binary: grype
+    goos:
+      - windows
+    goarch:
+      - amd64
+    mod_timestamp: *build-timestamp
+    ldflags: *build-ldflags
 
 archives:
-  - format: tar.gz
-    builds:
-      - grype # i.e. Linux only
-  - format: zip # This is a hack! We don't actually intend to use _this_ ZIP file, we just need goreleaser to consider the ZIP file produced by gon (which will have the same file name) to be an artifact so we can use it downstream in publishing (e.g. to a homebrew tap)
-    id: grype-zip
-    builds:
-      - grype-macos
-
-signs:
-  - artifacts: checksum
-    cmd: sh
-    args:
-      - '-c'
-      # we should not include the zip artifact, as the artifact is mutated throughout the next macOS notarization step
-      # note: sed -i is not portable
-      - 'sed "/.*\.zip/d" ${artifact} > tmpfile && mv tmpfile ${artifact} && gpg --output ${signature} --detach-sign ${artifact}'
-  - id: grype-macos-signing
+  - id: linux-archives
     ids:
-      - grype-macos
-    cmd: ./.github/scripts/mac-sign-and-notarize.sh
-    signature: "grype_${VERSION}_darwin_amd64.dmg" # This is somewhat unintuitive. This gets the DMG file recognized as an artifact. In fact, both a DMG and a ZIP file are being produced by this signing step.
-    args:
-      - "{{ .IsSnapshot }}"
-      - "gon.hcl"
-      - "./dist/grype_{{ .Version }}_darwin_amd64"
-    artifacts: all
+      - linux-build
+
+  - id: darwin-archives
+    ids:
+      - darwin-build
+
+  - id: windows-archives
+    formats: [zip]
+    ids:
+      - windows-build
 
 nfpms:
   - license: "Apache 2.0"
@@ -85,33 +81,288 @@ nfpms:
       - rpm
       - deb
 
-brews:
-  - tap:
+homebrew_casks:
+  - repository:
       owner: anchore
       name: homebrew-grype
-    install: |
-        bin.install "grype"
-
-        # Install bash completion
-        output = Utils.popen_read("#{bin}/grype completion bash")
-        (bash_completion/"grype").write output
-
-        # Install zsh completion
-        output = Utils.popen_read("#{bin}/grype completion zsh")
-        (zsh_completion/"_grype").write output
+      token: "{{.Env.GITHUB_BREW_TOKEN}}"
+    ids:
+      - darwin-archives
+      - linux-archives
     homepage: *website
     description: *description
+    license: "Apache License 2.0"
+    conflicts:
+      # claim that the previous grype formula (in the root of homebrew-grype) conflicts with the new cask
+      # see https://goreleaser.com/deprecations/#brews for more information
+      - formula: grype
 
 dockers:
-  - dockerfile: Dockerfile
-    image_templates:
-      - "anchore/grype:latest"
-      - "anchore/grype:{{ .Tag }}"
-      - "anchore/grype:v{{ .Major }}"
-      - "anchore/grype:v{{ .Major }}.{{ .Minor }}"
+  # production images...
+  - image_templates:
+      - anchore/grype:{{.Tag}}-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-amd64
+    goarch: amd64
+    dockerfile: Dockerfile
+    use: buildx
     build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
       - "--build-arg=VCS_URL={{.GitURL}}"
-    use_buildx: true
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-arm64v8
+    goarch: arm64
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64/v8"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-ppc64le
+    goarch: ppc64le
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/ppc64le"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-s390x
+      - ghcr.io/anchore/grype:{{.Tag}}-s390x
+    goarch: s390x
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/s390x"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  # nonroot images...
+  - image_templates:
+      - anchore/grype:{{.Tag}}-nonroot-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-amd64
+    goarch: amd64
+    dockerfile: Dockerfile.nonroot
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-nonroot-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-arm64v8
+    goarch: arm64
+    dockerfile: Dockerfile.nonroot
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64/v8"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-nonroot-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-ppc64le
+    goarch: ppc64le
+    dockerfile: Dockerfile.nonroot
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/ppc64le"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-nonroot-s390x
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-s390x
+    goarch: s390x
+    dockerfile: Dockerfile.nonroot
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/s390x"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  # debug images...
+  - image_templates:
+      - anchore/grype:{{.Tag}}-debug-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-amd64
+    goarch: amd64
+    dockerfile: Dockerfile.debug
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-debug-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-arm64v8
+    goarch: arm64
+    dockerfile: Dockerfile.debug
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64/v8"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-debug-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-ppc64le
+    goarch: ppc64le
+    dockerfile: Dockerfile.debug
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/ppc64le"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+  - image_templates:
+      - anchore/grype:{{.Tag}}-debug-s390x
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-s390x
+    goarch: s390x
+    dockerfile: Dockerfile.debug
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/s390x"
+      - "--provenance=false"
+      - "--build-arg=BUILD_DATE={{.Date}}"
+      - "--build-arg=BUILD_VERSION={{.Version}}"
+      - "--build-arg=VCS_REF={{.FullCommit}}"
+      - "--build-arg=VCS_URL={{.GitURL}}"
+
+docker_manifests:
+  - name_template: anchore/grype:latest
+    image_templates:
+      - anchore/grype:{{.Tag}}-amd64
+      - anchore/grype:{{.Tag}}-arm64v8
+      - anchore/grype:{{.Tag}}-ppc64le
+      - anchore/grype:{{.Tag}}-s390x
+
+  - name_template: ghcr.io/anchore/grype:latest
+    image_templates:
+      - ghcr.io/anchore/grype:{{.Tag}}-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-s390x
+
+  - name_template: anchore/grype:{{.Tag}}
+    image_templates:
+      - anchore/grype:{{.Tag}}-amd64
+      - anchore/grype:{{.Tag}}-arm64v8
+      - anchore/grype:{{.Tag}}-ppc64le
+      - anchore/grype:{{.Tag}}-s390x
+
+  - name_template: ghcr.io/anchore/grype:{{.Tag}}
+    image_templates:
+      - ghcr.io/anchore/grype:{{.Tag}}-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-s390x
+
+  # nonroot images...
+  - name_template: anchore/grype:nonroot
+    image_templates:
+      - anchore/grype:{{.Tag}}-nonroot-amd64
+      - anchore/grype:{{.Tag}}-nonroot-arm64v8
+      - anchore/grype:{{.Tag}}-nonroot-ppc64le
+      - anchore/grype:{{.Tag}}-nonroot-s390x
+
+  - name_template: ghcr.io/anchore/grype:nonroot
+    image_templates:
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-s390x
+
+  - name_template: anchore/grype:{{.Tag}}-nonroot
+    image_templates:
+      - anchore/grype:{{.Tag}}-nonroot-amd64
+      - anchore/grype:{{.Tag}}-nonroot-arm64v8
+      - anchore/grype:{{.Tag}}-nonroot-ppc64le
+      - anchore/grype:{{.Tag}}-nonroot-s390x
+
+  - name_template: ghcr.io/anchore/grype:{{.Tag}}-nonroot
+    image_templates:
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-s390x
+
+  # debug images...
+  - name_template: anchore/grype:debug
+    image_templates:
+      - anchore/grype:{{.Tag}}-debug-amd64
+      - anchore/grype:{{.Tag}}-debug-arm64v8
+      - anchore/grype:{{.Tag}}-debug-ppc64le
+      - anchore/grype:{{.Tag}}-debug-s390x
+
+  - name_template: ghcr.io/anchore/grype:debug
+    image_templates:
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-s390x
+
+  - name_template: anchore/grype:{{.Tag}}-debug
+    image_templates:
+      - anchore/grype:{{.Tag}}-debug-amd64
+      - anchore/grype:{{.Tag}}-debug-arm64v8
+      - anchore/grype:{{.Tag}}-debug-ppc64le
+      - anchore/grype:{{.Tag}}-debug-s390x
+
+  - name_template: ghcr.io/anchore/grype:{{.Tag}}-debug
+    image_templates:
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-amd64
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-arm64v8
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-ppc64le
+      - ghcr.io/anchore/grype:{{.Tag}}-debug-s390x
+
+# the signature, certificate, and transparency log proof all land in a single sigstore bundle.
+signs:
+  - cmd: .tool/cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum

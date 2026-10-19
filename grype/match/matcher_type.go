@@ -1,46 +1,49 @@
 package match
 
 const (
-	UnknownMatcherType MatcherType = iota
-	ApkMatcher
-	RubyGemMatcher
-	DpkgMatcher
-	RpmDBMatcher
-	JavaMatcher
-	PythonMatcher
-	JavascriptMatcher
-	MsrcMatcher
+	UnknownMatcherType MatcherType = "UnknownMatcherType"
+	StockMatcher       MatcherType = "stock-matcher"
+	ApkMatcher         MatcherType = "apk-matcher"
+	RubyGemMatcher     MatcherType = "ruby-gem-matcher"
+	DpkgMatcher        MatcherType = "dpkg-matcher"
+	RpmMatcher         MatcherType = "rpm-matcher"
+	JavaMatcher        MatcherType = "java-matcher"
+	PythonMatcher      MatcherType = "python-matcher"
+	DotnetMatcher      MatcherType = "dotnet-matcher"
+	JavascriptMatcher  MatcherType = "javascript-matcher"
+	MsrcMatcher        MatcherType = "msrc-matcher"
+	PortageMatcher     MatcherType = "portage-matcher"
+	GoModuleMatcher    MatcherType = "go-module-matcher"
+	OpenVexMatcher     MatcherType = "openvex-matcher"
+	CsafVexMatcher     MatcherType = "csafvex-matcher"
+	RustMatcher        MatcherType = "rust-matcher"
+	BitnamiMatcher     MatcherType = "bitnami-matcher"
+	PacmanMatcher      MatcherType = "pacman-matcher"
+	HexMatcher         MatcherType = "hex-matcher"
 )
-
-var matcherTypeStr = []string{
-	"UnknownMatcherType",
-	"apk-matcher",
-	"ruby-gem-matcher",
-	"dpkg-matcher",
-	"rpmdb-matcher",
-	"java-matcher",
-	"python-matcher",
-	"javascript-matcher",
-	"msrc-matcher",
-}
 
 var AllMatcherTypes = []MatcherType{
 	ApkMatcher,
 	RubyGemMatcher,
 	DpkgMatcher,
-	RpmDBMatcher,
+	RpmMatcher,
 	JavaMatcher,
 	PythonMatcher,
+	DotnetMatcher,
 	JavascriptMatcher,
 	MsrcMatcher,
+	PortageMatcher,
+	GoModuleMatcher,
+	OpenVexMatcher,
+	CsafVexMatcher,
+	RustMatcher,
+	BitnamiMatcher,
+	PacmanMatcher,
+	HexMatcher,
 }
 
-type MatcherType int
+type MatcherType string
 
-func (f MatcherType) String() string {
-	if int(f) >= len(matcherTypeStr) || f < 0 {
-		return matcherTypeStr[0]
-	}
-
-	return matcherTypeStr[f]
+func (t MatcherType) String() string {
+	return string(t)
 }

@@ -1,40 +1,42 @@
 package version
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type testCase struct {
+	name       string
 	version    string
 	constraint string
 	satisfied  bool
-	createErr  error
-	constErr   error
-	checkErr   error
+	wantError  require.ErrorAssertionFunc
 }
 
-func (c *testCase) name() string {
+func (c *testCase) tName() string {
+	if c.name != "" {
+		return c.name
+	}
+
 	return fmt.Sprintf("ver='%s'const='%s'", c.version, strings.ReplaceAll(c.constraint, " ", ""))
 }
 
-func (c *testCase) assert(t *testing.T, format Format, constraint Constraint) {
+func (c *testCase) assertVersionConstraint(t *testing.T, format Format, constraint Constraint) {
 	t.Helper()
-
-	verObj, err := NewVersion(c.version, format)
-	if !errors.Is(err, c.createErr) {
-		t.Fatalf("unexpected create error: '%+v'!='%+v'", err, c.createErr)
+	if c.wantError == nil {
+		c.wantError = require.NoError
 	}
 
-	isVulnerable, err := constraint.Satisfied(verObj)
-	if !errors.Is(err, c.checkErr) {
-		t.Fatalf("unexpected check error: '%+v'!='%+v'", err, c.checkErr)
-	}
+	version := New(c.version, format)
 
-	if isVulnerable != c.satisfied {
-		t.Errorf("unexpected constraint check result: expected %+v, got %+v", c.satisfied, isVulnerable)
+	isSatisfied, err := constraint.Satisfied(version)
+	c.wantError(t, err)
+	if err != nil {
+		return
 	}
-
+	assert.Equal(t, c.satisfied, isSatisfied, "unexpected constraint check result")
 }

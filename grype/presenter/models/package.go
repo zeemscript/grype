@@ -1,28 +1,39 @@
 package models
 
 import (
+	"github.com/anchore/grype/grype/internal/packagemetadata"
 	"github.com/anchore/grype/grype/pkg"
+	"github.com/anchore/syft/syft/file"
 	syftPkg "github.com/anchore/syft/syft/pkg"
-	syftSource "github.com/anchore/syft/syft/source"
 )
 
 // Package is meant to be only the fields that are needed when displaying a single pkg.Package object for the JSON presenter.
 type Package struct {
-	Name      string                `json:"name"`
-	Version   string                `json:"version"`
-	Type      syftPkg.Type          `json:"type"`
-	Locations []syftSource.Location `json:"locations"`
-	Language  syftPkg.Language      `json:"language"`
-	Licenses  []string              `json:"licenses"`
-	CPEs      []string              `json:"cpes"`
-	PURL      string                `json:"purl"`
-	Metadata  interface{}           `json:"metadata"`
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Version      string              `json:"version"`
+	Type         syftPkg.Type        `json:"type"`
+	Locations    file.Locations      `json:"locations"`
+	Language     syftPkg.Language    `json:"language"`
+	Licenses     []string            `json:"licenses"`
+	CPEs         []string            `json:"cpes"`
+	PURL         string              `json:"purl"`
+	Upstreams    []UpstreamPackage   `json:"upstreams"`
+	MetadataType string              `json:"metadataType,omitempty"`
+	Metadata     any                 `json:"metadata,omitempty"`
+	Annotations  map[string][]string `json:"annotations,omitempty"`
+}
+
+type UpstreamPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
 }
 
 func newPackage(p pkg.Package) Package {
 	var cpes = make([]string, 0)
 	for _, c := range p.CPEs {
-		cpes = append(cpes, c.BindToFmtString())
+		// use .String() to ensure proper escaping
+		cpes = append(cpes, c.Attributes.String())
 	}
 
 	licenses := p.Licenses
@@ -30,15 +41,27 @@ func newPackage(p pkg.Package) Package {
 		licenses = make([]string, 0)
 	}
 
+	var upstreams = make([]UpstreamPackage, 0)
+	for _, u := range p.Upstreams {
+		upstreams = append(upstreams, UpstreamPackage{
+			Name:    u.Name,
+			Version: u.Version,
+		})
+	}
+
 	return Package{
-		Name:      p.Name,
-		Version:   p.Version,
-		Locations: p.Locations,
-		Licenses:  licenses,
-		Language:  p.Language,
-		Type:      p.Type,
-		CPEs:      cpes,
-		PURL:      p.PURL,
-		Metadata:  p.Metadata,
+		ID:           string(p.ID),
+		Name:         p.Name,
+		Version:      p.Version,
+		Locations:    p.Locations.ToSlice(),
+		Licenses:     licenses,
+		Language:     p.Language,
+		Type:         p.Type,
+		CPEs:         cpes,
+		PURL:         p.PURL,
+		Upstreams:    upstreams,
+		MetadataType: packagemetadata.JSONName(p.Metadata),
+		Metadata:     p.Metadata,
+		Annotations:  p.Annotations,
 	}
 }
