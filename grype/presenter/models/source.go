@@ -8,8 +8,8 @@ import (
 )
 
 type source struct {
-	Type   string      `json:"type"`
-	Target interface{} `json:"target"`
+	Type   string `json:"type"`
+	Target any    `json:"target"`
 }
 
 // newSource creates a new source object to be represented into JSON.
@@ -29,6 +29,11 @@ func newSource(src syftSource.Description) (source, error) {
 		return source{
 			Type:   "cpe",
 			Target: m.CPE,
+		}, nil
+	case pkg.ZarfPackageMetadata:
+		return source{
+			Type:   "zarf-package",
+			Target: m.Path,
 		}, nil
 	case syftSource.ImageMetadata:
 		// ensure that empty collections are not shown as null
@@ -74,8 +79,8 @@ func newSource(src syftSource.Description) (source, error) {
 	case nil:
 		// we may be showing results from a input source that does not support source information
 		return source{
-			Type:   "unknown",
-			Target: "unknown",
+			Type:   unknownValue,
+			Target: unknownValue,
 		}, nil
 	default:
 		return source{}, fmt.Errorf("unsupported source: %T", src.Metadata)

@@ -15,7 +15,7 @@ import (
 	"github.com/anchore/syft/syft/source/sourceproviders"
 )
 
-func syftProvider(userInput string, config ProviderConfig, applyChannel func(*distro.Distro) bool) ([]Package, Context, *sbom.SBOM, error) {
+func syftProvider(userInput string, config ProviderConfig, applyChannel func(*distro.Distro)) ([]*Package, Context, *sbom.SBOM, error) {
 	src, err := getSource(userInput, config)
 	if err != nil {
 		return nil, Context{}, nil, err
@@ -35,9 +35,7 @@ func syftProvider(userInput string, config ProviderConfig, applyChannel func(*di
 
 	d, distroDetectionFailed := distroFromSBOM(s, config, applyChannel)
 
-	pkgCatalog := removePackagesByOverlap(s.Artifacts.Packages, s.Relationships, d)
-
-	packages := FromCollection(pkgCatalog, config.SynthesisConfig)
+	packages := FromCollection(s.Artifacts.Packages, s.Relationships, config.SynthesisConfig)
 	pkgCtx := Context{
 		Source:                &srcDescription,
 		Distro:                d,
@@ -47,7 +45,7 @@ func syftProvider(userInput string, config ProviderConfig, applyChannel func(*di
 	return packages, pkgCtx, s, nil
 }
 
-func distroFromSBOM(s *sbom.SBOM, config ProviderConfig, applyChannel func(*distro.Distro) bool) (d *distro.Distro, detectionFailed bool) {
+func distroFromSBOM(s *sbom.SBOM, config ProviderConfig, applyChannel func(*distro.Distro)) (d *distro.Distro, detectionFailed bool) {
 	if config.Distro.Override != nil {
 		d = config.Distro.Override
 	} else {

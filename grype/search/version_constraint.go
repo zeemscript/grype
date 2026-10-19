@@ -69,12 +69,14 @@ func ByFixedVersion(v version.Version) vulnerability.Criteria {
 				return false, "", nil
 			}
 			for _, fixVersion := range vuln.Fix.Versions {
-				cmp, e := version.New(fixVersion, v.Format).Compare(&v)
+				// compare with v (the package) as the receiver so its embedded ComparisonConfig (e.g. missing-epoch
+				// strategy) is honored; cmp >= 0 means the installed version is at or past the fix, so it is fixed.
+				cmp, e := v.Compare(version.New(fixVersion, v.Format))
 				if e != nil {
 					err = e
 				}
-				if cmp <= 0 {
-					// fix version is less than or equal to the provided version, so is considered fixed
+				if cmp >= 0 {
+					// installed version is greater than or equal to the fix version, so is considered fixed
 					return true, fmt.Sprintf("fix version %v is less than %v", v, fixVersion), err
 				}
 			}
@@ -106,7 +108,13 @@ func (f *constraintFuncCriteria) MatchesVulnerability(value vulnerability.Vulner
 		return false, "no version constraint", nil
 	}
 	matches, err := f.fn(value.Constraint)
-	// TODO: should we do something about this?
+	if err != nil {
+		// TODO revisit this. Returning no error has the effect of dropping the vulnerability in the case an error occurs parsing a package or other version.
+		// this replicates the existing VulnerabilityProvider behavior; see: vulnerability_provider.go filterAffectedPackageRanges
+		// if we change the VP behavior, we need to change this behavior, too
+		log.WithFields("error", err, "constraint", value.Constraint).Debug("match constraint error")
+		return false, "version check error", nil
+	}
 	return matches, "", err
 }
 

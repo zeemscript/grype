@@ -59,7 +59,7 @@ func ReadState(location string) (*State, error) {
 
 	start := time.Now()
 	if sd.Listing != nil {
-		algorithm := "xxh64" // sane default for performance
+		algorithm := xxh64Algorithm // sane default for performance
 
 		// get extension from listing file
 		extension := filepath.Ext(sd.Listing.Path)
@@ -72,17 +72,18 @@ func ReadState(location string) (*State, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unable to open listing file %q: %w", listingPath, err)
 		}
+		defer f.Close()
 
 		// note: bufio scanner is **much** faster than Fscan
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := scanner.Text()
-			index := strings.Index(line, "  ") // faster than strings.Split
-			if index != -1 {
+			before, after, ok := strings.Cut(line, "  ") // faster than strings.Split
+			if ok {
 				sd.resultFileStates = append(sd.resultFileStates,
 					File{
-						Path:      line[index+2:],
-						Digest:    line[:index],
+						Path:      after,
+						Digest:    before,
 						Algorithm: algorithm,
 					},
 				)

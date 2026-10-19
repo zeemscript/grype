@@ -874,11 +874,11 @@ func TestMatchByImage(t *testing.T) {
 				},
 			})
 
-			actualResults := grype.FindVulnerabilitiesForPackage(theProvider, matchers, pkg.FromCollection(s.Artifacts.Packages, pkg.SynthesisConfig{
+			actualResults := grype.FindVulnerabilitiesForPackage(theProvider, matchers, pkg.FromPtrs(pkg.FromCollection(s.Artifacts.Packages, s.Relationships, pkg.SynthesisConfig{
 				Distro: pkg.DistroConfig{
 					Override: distro.FromRelease(s.Artifacts.LinuxDistribution, distro.DefaultFixChannels()),
 				},
-			}))
+			})))
 			for _, m := range actualResults.Sorted() {
 				for _, d := range m.Details {
 					observedMatchers.Add(string(d.Matcher))
@@ -927,7 +927,24 @@ func TestMatchByImage(t *testing.T) {
 				)
 			}
 
-			result.Details = result.Details[:len(result.Details)-1]
+			// the VEX processor contributes exactly one detail to the match it un-ignores and leaves
+			// the rest of the match alone. Matches.Add normalizes the details of every match it
+			// stores -- deduped and sorted strongest-first -- so the VEX detail is not necessarily
+			// the last one; select it by its matcher and compare what remains to the original match.
+			var vexDetails, originalDetails match.Details
+			for _, detail := range result.Details {
+				switch detail.Matcher {
+				case match.OpenVexMatcher, match.CsafVexMatcher:
+					vexDetails = append(vexDetails, detail)
+				default:
+					originalDetails = append(originalDetails, detail)
+				}
+			}
+			if len(vexDetails) != 1 {
+				t.Errorf("expected exactly one VEX detail on the VEXed result, got %d", len(vexDetails))
+			}
+
+			result.Details = originalDetails
 			actualResults := match.NewMatches()
 			actualResults.Add(result)
 

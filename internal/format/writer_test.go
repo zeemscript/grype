@@ -1,6 +1,7 @@
 package format
 
 import (
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func Test_MakeScanResultWriter(t *testing.T) {
 		},
 		{
 			outputs: []string{"unknown"},
-			wantErr: func(t assert.TestingT, err error, bla ...interface{}) bool {
+			wantErr: func(t assert.TestingT, err error, bla ...any) bool {
 				return assert.ErrorContains(t, err, `unsupported output format "unknown", supported formats are: [`)
 			},
 		},
@@ -153,7 +154,7 @@ func Test_newSBOMMultiWriter(t *testing.T) {
 			outputs := test.outputs
 			for i := range outputs {
 				if outputs[i].Path != "" {
-					outputs[i].Path = tmp + outputs[i].Path
+					outputs[i].Path = filepath.Join(tmp, outputs[i].Path)
 				}
 			}
 
@@ -165,6 +166,14 @@ func Test_newSBOMMultiWriter(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+			// release file handles so the temp dir can be removed (required on windows)
+			t.Cleanup(func() {
+				for _, w := range mw.writers {
+					if c, ok := w.(io.Closer); ok {
+						_ = c.Close()
+					}
+				}
+			})
 
 			assert.Len(t, mw.writers, len(test.expected))
 
@@ -174,7 +183,7 @@ func Test_newSBOMMultiWriter(t *testing.T) {
 					assert.Equal(t, string(w.format), e.format)
 					assert.NotNil(t, w.out)
 					if e.file != "" {
-						assert.FileExists(t, tmp+e.file)
+						assert.FileExists(t, filepath.Join(tmp, e.file))
 					}
 				case *scanResultPublisher:
 					assert.Equal(t, string(w.format), e.format)

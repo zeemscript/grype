@@ -17,7 +17,7 @@ type CPELiteralMetadata struct {
 	CPE string
 }
 
-func cpeProvider(userInput string, config ProviderConfig) ([]Package, Context, *sbom.SBOM, error) {
+func cpeProvider(userInput string, config ProviderConfig) ([]*Package, Context, *sbom.SBOM, error) {
 	reader, ctx, err := getCPEReader(userInput)
 	if err != nil {
 		return nil, Context{}, nil, err
@@ -28,7 +28,7 @@ func cpeProvider(userInput string, config ProviderConfig) ([]Package, Context, *
 		return nil, Context{}, nil, fmt.Errorf("unable to decode cpe: %w", err)
 	}
 
-	return FromCollection(s.Artifacts.Packages, config.SynthesisConfig), ctx, s, nil
+	return FromCollection(s.Artifacts.Packages, s.Relationships, config.SynthesisConfig), ctx, s, nil
 }
 
 func getCPEReader(userInput string) (r io.Reader, ctx Context, err error) {

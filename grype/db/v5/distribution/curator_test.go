@@ -357,7 +357,7 @@ func TestCurator_validateStaleness(t *testing.T) {
 				validateAge:     true,
 				md:              Metadata{Built: now.UTC().Add(-4 * time.Hour)},
 			},
-			wantErr: func(t assert.TestingT, err error, i ...interface{}) bool {
+			wantErr: func(t assert.TestingT, err error, i ...any) bool {
 				return assert.ErrorContains(t, err, "the vulnerability database was built")
 			},
 		},
@@ -789,6 +789,7 @@ func Test_unarchive(t *testing.T) {
 	}
 	err = format.Archive(t.Context(), out, files)
 	require.NoError(t, err)
+	require.NoError(t, out.Close())
 
 	destination := t.TempDir()
 	err = unarchive(source, destination)

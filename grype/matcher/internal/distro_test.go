@@ -4,10 +4,12 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/scylladb/go-set/strset"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/anchore/grype/grype/distro"
+	"github.com/anchore/grype/grype/internal/ignorereasons"
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/version"
@@ -134,7 +136,7 @@ func TestMatchPackageByDistroWithIgnoreRules(t *testing.T) {
 				},
 			},
 			// one rule per (vulnID, path) pair
-			expectedIgnoreVulnIDs: []string{"CVE-2023-backported", "CVE-2023-backported"},
+			expectedIgnoreVulnIDs: []string{"CVE-2023-backported"},
 		},
 		{
 			name: "package version is still vulnerable - should NOT produce ignore rules",
@@ -202,7 +204,7 @@ func TestMatchPackageByDistroWithIgnoreRules(t *testing.T) {
 			},
 			expectedMatchIDs: []string{"CVE-2023-still-vulnerable"},
 			// one rule per path for the fixed CVE only
-			expectedIgnoreVulnIDs: []string{"CVE-2023-already-fixed", "CVE-2023-already-fixed"},
+			expectedIgnoreVulnIDs: []string{"CVE-2023-already-fixed"},
 		},
 		{
 			name: "fixed CVE with related vulnerabilities - should produce ignore rules for all IDs at all paths",
@@ -225,7 +227,7 @@ func TestMatchPackageByDistroWithIgnoreRules(t *testing.T) {
 				},
 			},
 			// both IDs × 2 paths = 4 rules
-			expectedIgnoreVulnIDs: []string{"CVE-2023-backported", "CVE-2023-backported", "GHSA-xxxx-yyyy-zzzz", "GHSA-xxxx-yyyy-zzzz"},
+			expectedIgnoreVulnIDs: []string{"CVE-2023-backported", "GHSA-xxxx-yyyy-zzzz"},
 		},
 		{
 			name: "no distro on package - should NOT produce ignore rules",
@@ -265,32 +267,13 @@ func TestMatchPackageByDistroWithIgnoreRules(t *testing.T) {
 			},
 			expectNoIgnoreRules: true,
 		},
-		{
-			name: "no FileOwner metadata - should NOT produce ignore rules even if fixed",
-			pkg: pkg.Package{
-				ID:      pkg.ID(uuid.NewString()),
-				Name:    "python3-requests",
-				Version: "2.25.1-14.el8",
-				Type:    syftPkg.RpmPkg,
-				Distro:  distro.New(distro.RedHat, "8", ""),
-				// no Metadata — does not implement FileOwner
-			},
-			vulnerabilities: []vulnerability.Vulnerability{
-				{
-					PackageName: "python3-requests",
-					Constraint:  version.MustGetConstraint("< 2.25.1-14.el8", version.RpmFormat),
-					Reference:   vulnerability.Reference{ID: "CVE-2023-backported", Namespace: "secdb:distro:redhat:8"},
-				},
-			},
-			expectNoIgnoreRules: true,
-		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := mock.VulnerabilityProvider(test.vulnerabilities...)
 
-			matches, ignoreFilters, err := MatchPackageByDistroWithOwnedFiles(store, test.pkg, nil, match.PythonMatcher, nil)
+			matches, ignoreFilters, err := MatchPackageByDistro(store, test.pkg, nil, match.PythonMatcher, nil)
 			require.NoError(t, err)
 
 			// verify matches
@@ -308,17 +291,22 @@ func TestMatchPackageByDistroWithIgnoreRules(t *testing.T) {
 			}
 
 			// extract the vulnerability IDs from the ignore rules
-			var gotVulnIDs []string
+			gotVulnIDs := strset.New()
 			for _, filter := range ignoreFilters {
+				related, ok := filter.(match.IgnoreRelatedPackage)
+				if ok {
+					gotVulnIDs.Add(related.VulnerabilityID)
+					continue
+				}
 				rule, ok := filter.(match.IgnoreRule)
-				require.True(t, ok, "expected IgnoreRule type")
-				gotVulnIDs = append(gotVulnIDs, rule.Vulnerability)
+				require.True(t, ok, "expected IgnoreRule or IgnoreRelatedPackage types")
+				gotVulnIDs.Add(rule.Vulnerability)
 				assert.True(t, rule.IncludeAliases, "expected IncludeAliases to be true")
-				assert.Equal(t, "DistroPackageFixed", rule.Reason)
+				assert.Contains(t, rule.Reason, ignorereasons.DistroFixed)
 				assert.NotEmpty(t, rule.Package.Location, "expected location to be set")
 			}
 
-			assert.ElementsMatch(t, test.expectedIgnoreVulnIDs, gotVulnIDs, "unexpected ignore rule vulnerability IDs")
+			assert.ElementsMatch(t, test.expectedIgnoreVulnIDs, gotVulnIDs.List(), "unexpected ignore rule vulnerability IDs")
 		})
 	}
 }
