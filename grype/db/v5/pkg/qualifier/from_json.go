@@ -3,7 +3,7 @@ package qualifier
 import (
 	"encoding/json"
 
-	"github.com/mitchellh/mapstructure"
+	"github.com/go-viper/mapstructure/v2"
 
 	"github.com/anchore/grype/grype/db/v5/pkg/qualifier/platformcpe"
 	"github.com/anchore/grype/grype/db/v5/pkg/qualifier/rpmmodularity"
@@ -11,7 +11,7 @@ import (
 )
 
 func FromJSON(data []byte) ([]Qualifier, error) {
-	var records []map[string]interface{}
+	var records []map[string]any
 	if err := json.Unmarshal(data, &records); err != nil {
 		return nil, err
 	}

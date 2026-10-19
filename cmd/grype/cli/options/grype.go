@@ -2,6 +2,7 @@ package options
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/anchore/clio"
 	"github.com/anchore/grype/grype/match"
@@ -11,8 +12,9 @@ import (
 )
 
 type Grype struct {
-	Outputs                    []string           `yaml:"output" json:"output" mapstructure:"output"`                                           // -o, <presenter>=<file> the Presenter hint string to use for report formatting and the output file
-	File                       string             `yaml:"file" json:"file" mapstructure:"file"`                                                 // --file, the file to write report output to
+	Outputs                    []string           `yaml:"output" json:"output" mapstructure:"output"` // -o, <presenter>=<file> the Presenter hint string to use for report formatting and the output file
+	File                       string             `yaml:"file" json:"file" mapstructure:"file"`       // --file, the file to write report output to
+	Pretty                     bool               `yaml:"pretty" json:"pretty" mapstructure:"pretty"`
 	Distro                     string             `yaml:"distro" json:"distro" mapstructure:"distro"`                                           // --distro, specify a distro to explicitly use
 	GenerateMissingCPEs        bool               `yaml:"add-cpes-if-none" json:"add-cpes-if-none" mapstructure:"add-cpes-if-none"`             // --add-cpes-if-none, automatically generate CPEs if they are not present in import (e.g. from a 3rd party SPDX document)
 	OutputTemplateFile         string             `yaml:"output-template-file" json:"output-template-file" mapstructure:"output-template-file"` // -t, the template file to use for formatting the final report
@@ -24,18 +26,32 @@ type Grype struct {
 	Search                     search             `yaml:"search" json:"search" mapstructure:"search"`
 	Ignore                     []match.IgnoreRule `yaml:"ignore" json:"ignore" mapstructure:"ignore"`
 	Exclusions                 []string           `yaml:"exclude" json:"exclude" mapstructure:"exclude"`
-	DB                         Database           `yaml:"db" json:"db" mapstructure:"db"`
 	ExternalSources            externalSources    `yaml:"external-sources" json:"externalSources" mapstructure:"external-sources"`
 	Match                      matchConfig        `yaml:"match" json:"match" mapstructure:"match"`
 	FailOn                     string             `yaml:"fail-on-severity" json:"fail-on-severity" mapstructure:"fail-on-severity"`
 	Registry                   registry           `yaml:"registry" json:"registry" mapstructure:"registry"`
 	ShowSuppressed             bool               `yaml:"show-suppressed" json:"show-suppressed" mapstructure:"show-suppressed"`
-	ByCVE                      bool               `yaml:"by-cve" json:"by-cve" mapstructure:"by-cve"` // --by-cve, indicates if the original match vulnerability IDs should be preserved or the CVE should be used instead
+	IncludeMatcherSuppressions bool               `yaml:"include-matcher-suppressions" json:"include-matcher-suppressions" mapstructure:"include-matcher-suppressions"` // include matches suppressed internally by matchers (distro fixed/NAK records, built-in false-positive list) in the ignored matches output, default=false
+	ByCVE                      bool               `yaml:"by-cve" json:"by-cve" mapstructure:"by-cve"`                                                                   // --by-cve, indicates if the original match vulnerability IDs should be preserved or the CVE should be used instead
+	SortBy                     SortBy             `yaml:",inline" json:",inline" mapstructure:",squash"`
 	Name                       string             `yaml:"name" json:"name" mapstructure:"name"`
 	DefaultImagePullSource     string             `yaml:"default-image-pull-source" json:"default-image-pull-source" mapstructure:"default-image-pull-source"`
+	From                       []string           `yaml:"from" json:"from" mapstructure:"from"`
 	VexDocuments               []string           `yaml:"vex-documents" json:"vex-documents" mapstructure:"vex-documents"`
 	VexAdd                     []string           `yaml:"vex-add" json:"vex-add" mapstructure:"vex-add"`                                                                   // GRYPE_VEX_ADD
 	MatchUpstreamKernelHeaders bool               `yaml:"match-upstream-kernel-headers" json:"match-upstream-kernel-headers" mapstructure:"match-upstream-kernel-headers"` // Show matches on kernel-headers packages where the match is on kernel upstream instead of marking them as ignored, default=false
+	FixChannel                 FixChannels        `yaml:"fix-channel" json:"fix-channel" mapstructure:"fix-channel"`                                                       // the fix channels to apply to the distro when matching
+	Timestamp                  bool               `yaml:"timestamp" json:"timestamp" mapstructure:"timestamp"`
+	Alerts                     Alerts             `yaml:"alerts" json:"alerts" mapstructure:"alerts"`
+	DatabaseCommand            `yaml:",inline" json:",inline" mapstructure:",squash"`
+}
+
+type developer struct {
+	DB databaseDeveloper `yaml:"db" json:"db" mapstructure:"db"`
+}
+
+type databaseDeveloper struct {
+	Debug bool `yaml:"debug" json:"debug" mapstructure:"debug"`
 }
 
 var _ interface {
@@ -46,13 +62,20 @@ var _ interface {
 
 func DefaultGrype(id clio.Identification) *Grype {
 	return &Grype{
-		Search:                     defaultSearch(source.SquashedScope),
-		DB:                         DefaultDatabase(id),
+		Search:     defaultSearch(source.SquashedScope),
+		FixChannel: DefaultFixChannels(),
+		DatabaseCommand: DatabaseCommand{
+			DB: DefaultDatabase(id),
+		},
 		Match:                      defaultMatchConfig(),
 		ExternalSources:            defaultExternalSources(),
 		CheckForAppUpdate:          true,
 		VexAdd:                     []string{},
 		MatchUpstreamKernelHeaders: false,
+		IncludeMatcherSuppressions: false,
+		SortBy:                     defaultSortBy(),
+		Timestamp:                  true,
+		Alerts:                     defaultAlerts(),
 	}
 }
 
@@ -80,7 +103,7 @@ func (o *Grype) AddFlags(flags clio.FlagSet) {
 
 	flags.StringVarP(&o.Distro,
 		"distro", "",
-		"distro to match against in the format: <distro>:<version>",
+		"distro to match against in the format: <distro>[-:@]<version>",
 	)
 
 	flags.BoolVarP(&o.GenerateMissingCPEs,
@@ -94,7 +117,7 @@ func (o *Grype) AddFlags(flags clio.FlagSet) {
 
 	flags.StringVarP(&o.FailOn,
 		"fail-on", "f",
-		fmt.Sprintf("set the return code to 1 if a vulnerability is found with a severity >= the given severity, options=%v", vulnerability.AllSeverities()),
+		fmt.Sprintf("set the return code to 2 if a vulnerability is found with a severity >= the given severity, options=%v", vulnerability.AllSeverities()),
 	)
 
 	flags.BoolVarP(&o.OnlyFixed,
@@ -132,6 +155,11 @@ func (o *Grype) AddFlags(flags clio.FlagSet) {
 		"an optional platform specifier for container image sources (e.g. 'linux/arm64', 'linux/arm64/v8', 'arm64', 'linux')",
 	)
 
+	flags.StringArrayVarP(&o.From,
+		"from", "",
+		"specify the source behavior to use (e.g. docker, registry, podman, containers-storage, oci-dir, ...)",
+	)
+
 	flags.StringArrayVarP(&o.VexDocuments,
 		"vex", "",
 		"a list of VEX documents to consider when producing scanning results",
@@ -139,6 +167,8 @@ func (o *Grype) AddFlags(flags clio.FlagSet) {
 }
 
 func (o *Grype) PostLoad() error {
+	o.From = flatten(o.From)
+
 	if o.FailOn != "" {
 		failOnSeverity := *o.FailOnSeverity()
 		if failOnSeverity == vulnerability.UnknownSeverity {
@@ -151,7 +181,7 @@ func (o *Grype) PostLoad() error {
 func (o *Grype) DescribeFields(descriptions clio.FieldDescriptionSet) {
 	descriptions.Add(&o.CheckForAppUpdate, `enable/disable checking for application updates on startup`)
 	descriptions.Add(&o.DefaultImagePullSource, `allows users to specify which image source should be used to generate the sbom
-valid values are: registry, docker, podman`)
+valid values are: registry, docker, podman, containers-storage`)
 	descriptions.Add(&o.Name, `same as --name; set the name of the target being analyzed`)
 	descriptions.Add(&o.Exclusions, `a list of globs to exclude from scanning, for example:
   - '/etc/**'
@@ -165,27 +195,46 @@ output-template-file: .grype/html.tmpl
 write output report to a file (default is to write to stdout)`)
 	descriptions.Add(&o.Outputs, `the output format of the vulnerability report (options: table, template, json, cyclonedx)
 when using template as the output type, you must also provide a value for 'output-template-file'`)
+	descriptions.Add(&o.Pretty, `pretty-print output`)
 	descriptions.Add(&o.FailOn, `upon scanning, if a severity is found at or above the given severity then the return code will be 1
 default is unset which will skip this validation (options: negligible, low, medium, high, critical)`)
-	descriptions.Add(&o.Ignore, `A list of vulnerability ignore rules, one or more property may be specified and all matching vulnerabilities will be ignored.
+	descriptions.Add(&o.Ignore, `a list of vulnerability ignore rules; a match must meet ALL criteria specified in a rule to be ignored.
 This is the full set of supported rule fields:
-  - vulnerability: CVE-2008-4318
-    fix-state: unknown
+  - vulnerability: CVE-2008-4318        # match by vulnerability ID (required if no other criteria are given)
+    namespace: nvd:cpe                   # match by vulnerability namespace (e.g. nvd:cpe, github:language:go)
+    fix-state: unknown                   # match by fix state; options: fixed, not-fixed, wont-fix, unknown
+    match-type: exact-direct-match       # match by how the vulnerability was found; options: exact-direct-match, exact-indirect-match, cpe-match
+    reason: "tolerated by policy"        # optional human-readable note recorded on the ignored match (does not affect matching)
+    include-aliases: true                # also apply the vulnerability ID match to aliases/related CVEs (default: false)
     package:
-      name: libcurl
-      version: 1.5.1
-      type: npm
-      location: "/usr/local/lib/node_modules/**"
+      name: libcurl                      # match by package name (supports regular expressions)
+      version: 1.5.1                     # match by package version
+      language: python                   # match by package language (e.g. python, javascript, java, go, …)
+      type: npm                          # match by package type (e.g. rpm, deb, apk, gem, npm, go-module, …)
+      location: "/usr/local/lib/node_modules/**"  # match by package location (supports glob patterns)
+      upstream-name: curl                # match by upstream package name (supports regular expressions)
 
-VEX fields apply when Grype reads vex data:
+VEX fields apply when Grype reads VEX data:
   - vex-status: not_affected
     vex-justification: vulnerable_code_not_present
 `)
 	descriptions.Add(&o.VexAdd, `VEX statuses to consider as ignored rules`)
 	descriptions.Add(&o.MatchUpstreamKernelHeaders, `match kernel-header packages with upstream kernel as kernel vulnerabilities`)
+	descriptions.Add(&o.IncludeMatcherSuppressions, `include matches suppressed internally by matchers (e.g. distro fixed/NAK records, the built-in false-positive list) in the ignored matches output`)
 }
 
 func (o Grype) FailOnSeverity() *vulnerability.Severity {
 	severity := vulnerability.ParseSeverity(o.FailOn)
 	return &severity
+}
+
+// flatten takes a list of comma-separated entries and returns a flattened list of trimmed values (preserving order)
+func flatten(commaSeparatedEntries []string) []string {
+	var out []string
+	for _, v := range commaSeparatedEntries {
+		for _, s := range strings.Split(v, ",") {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	return out
 }

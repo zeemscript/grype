@@ -1,125 +1,102 @@
 package pkg
 
 import (
-	"bufio"
 	"fmt"
 	"io"
-	"os"
+	"slices"
 	"strings"
 
-	"github.com/mitchellh/go-homedir"
-
+	"github.com/anchore/grype/grype/distro"
 	"github.com/anchore/packageurl-go"
-	"github.com/anchore/syft/syft/cpe"
-	"github.com/anchore/syft/syft/pkg"
+	"github.com/anchore/syft/syft/format"
+	syftPkg "github.com/anchore/syft/syft/pkg"
+	"github.com/anchore/syft/syft/sbom"
+	"github.com/anchore/syft/syft/source"
 )
 
 const (
-	purlInputPrefix  = "purl:"
-	cpesQualifierKey = "cpes"
+	purlInputPrefix       = "purl:"
+	singlePurlInputPrefix = "pkg:"
 )
 
-type errEmptyPurlFile struct {
-	purlFilepath string
+type PURLLiteralMetadata struct {
+	PURL string
 }
 
-func (e errEmptyPurlFile) Error() string {
-	return fmt.Sprintf("purl file is empty: %s", e.purlFilepath)
+func purlEnhancers(applyChannel func(*distro.Distro)) []Enhancer {
+	return []Enhancer{setUpstreamsFromPURL, setDistroFromPURL(applyChannel)}
 }
 
-func purlProvider(userInput string) ([]Package, error) {
-	p, err := getPurlPackages(userInput)
-	return p, err
-}
-
-func getPurlPackages(userInput string) ([]Package, error) {
-	reader, err := getPurlReader(userInput)
+func purlProvider(userInput string, config ProviderConfig, applyChannel func(*distro.Distro)) ([]*Package, Context, *sbom.SBOM, error) {
+	reader, ctx, err := getPurlReader(userInput)
 	if err != nil {
-		return nil, err
+		return nil, Context{}, nil, err
 	}
 
-	return decodePurlFile(reader)
+	s, _, _, err := format.Decode(reader)
+	if s == nil {
+		return nil, Context{}, nil, fmt.Errorf("unable to decode purl: %w", err)
+	}
+
+	return FromCollection(s.Artifacts.Packages, s.Relationships, config.SynthesisConfig, purlEnhancers(applyChannel)...), ctx, s, nil
 }
 
-func decodePurlFile(reader io.Reader) ([]Package, error) {
-	scanner := bufio.NewScanner(reader)
-	packages := []Package{}
-
-	for scanner.Scan() {
-		rawLine := scanner.Text()
-		purl, err := packageurl.FromString(rawLine)
-		if err != nil {
-			return nil, fmt.Errorf("unable to decode purl %s: %w", rawLine, err)
+func getPurlReader(userInput string) (r io.Reader, ctx Context, err error) {
+	if strings.HasPrefix(userInput, singlePurlInputPrefix) {
+		ctx.Source = &source.Description{
+			Metadata: PURLLiteralMetadata{
+				PURL: userInput,
+			},
 		}
+		return strings.NewReader(userInput), ctx, nil
+	}
+	return nil, ctx, errDoesNotProvide
+}
 
-		cpes := []cpe.CPE{}
-		epoch := "0"
-		for _, qualifier := range purl.Qualifiers {
-			if qualifier.Key == cpesQualifierKey {
-				rawCpes := strings.Split(qualifier.Value, ",")
-				for _, rawCpe := range rawCpes {
-					c, err := cpe.New(rawCpe, "")
-					if err != nil {
-						return nil, fmt.Errorf("unable to decode cpe %s in purl %s: %w", rawCpe, rawLine, err)
-					}
-					cpes = append(cpes, c)
+func setUpstreamsFromPURL(out *Package, purl packageurl.PackageURL, syftPkg syftPkg.Package) {
+	if len(out.Upstreams) == 0 || out.PURL == "" {
+		out.Upstreams = upstreamsFromPURL(purl, syftPkg.Type)
+	}
+}
+
+// upstreamsFromPURL reads any additional data Grype can use, which is ignored by Syft's PURL conversion
+func upstreamsFromPURL(purl packageurl.PackageURL, pkgType syftPkg.Type) (upstreams []UpstreamPackage) {
+	for _, qualifier := range purl.Qualifiers {
+		if qualifier.Key == syftPkg.PURLQualifierUpstream {
+			for _, newUpstream := range parseUpstream(purl.Name, qualifier.Value, pkgType) {
+				if slices.Contains(upstreams, newUpstream) {
+					continue
 				}
-			}
-
-			if qualifier.Key == "epoch" {
-				epoch = qualifier.Value
+				upstreams = append(upstreams, newUpstream)
 			}
 		}
+	}
+	return upstreams
+}
 
-		if purl.Type == packageurl.TypeRPM && !strings.HasPrefix(purl.Version, fmt.Sprintf("%s:", epoch)) {
-			purl.Version = fmt.Sprintf("%s:%s", epoch, purl.Version)
+func setDistroFromPURL(applyChannel func(*distro.Distro)) func(out *Package, purl packageurl.PackageURL, _ syftPkg.Package) {
+	return func(out *Package, purl packageurl.PackageURL, _ syftPkg.Package) {
+		if out.Distro == nil {
+			out.Distro = distroFromPURL(purl)
+			applyChannel(out.Distro)
 		}
-
-		packages = append(packages, Package{
-			ID:       ID(purl.String()),
-			CPEs:     cpes,
-			Name:     purl.Name,
-			Version:  purl.Version,
-			Type:     pkg.TypeByName(purl.Type),
-			Language: pkg.LanguageByName(purl.Type),
-			PURL:     purl.String(),
-		})
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return packages, nil
 }
 
-func getPurlReader(userInput string) (r io.Reader, err error) {
-	if !explicitlySpecifyingPurl(userInput) {
-		return nil, errDoesNotProvide
+// distroFromPURL reads distro data for Grype can use, which is ignored by Syft's PURL conversion
+func distroFromPURL(purl packageurl.PackageURL) (d *distro.Distro) {
+	var distroName, distroVersion string
+
+	for _, qualifier := range purl.Qualifiers {
+		if qualifier.Key == syftPkg.PURLQualifierDistro {
+			// Use shared parsing logic to support -, :, and @ separators
+			distroName, distroVersion = distro.ParseDistroString(qualifier.Value)
+		}
 	}
 
-	path := strings.TrimPrefix(userInput, purlInputPrefix)
-
-	return openPurlFile(path)
-}
-
-func openPurlFile(path string) (*os.File, error) {
-	expandedPath, err := homedir.Expand(path)
-	if err != nil {
-		return nil, fmt.Errorf("unable to open purls: %w", err)
+	if distroName != "" {
+		d = distro.NewFromNameVersion(distroName, distroVersion)
 	}
 
-	f, err := os.Open(expandedPath)
-	if err != nil {
-		return nil, fmt.Errorf("unable to open file %s: %w", expandedPath, err)
-	}
-
-	if !fileHasContent(f) {
-		return nil, errEmptyPurlFile{path}
-	}
-
-	return f, nil
-}
-
-func explicitlySpecifyingPurl(userInput string) bool {
-	return strings.HasPrefix(userInput, purlInputPrefix)
+	return d
 }

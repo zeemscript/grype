@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/anchore/go-collections"
+	"github.com/anchore/grype/grype/distro"
 	"github.com/anchore/grype/internal/log"
 	"github.com/anchore/stereoscope"
 	"github.com/anchore/stereoscope/pkg/image"
@@ -14,19 +15,12 @@ import (
 	"github.com/anchore/syft/syft/source/sourceproviders"
 )
 
-func syftProvider(userInput string, config ProviderConfig) ([]Package, Context, *sbom.SBOM, error) {
+func syftProvider(userInput string, config ProviderConfig, applyChannel func(*distro.Distro)) ([]*Package, Context, *sbom.SBOM, error) {
 	src, err := getSource(userInput, config)
 	if err != nil {
 		return nil, Context{}, nil, err
 	}
-
-	defer func() {
-		if src != nil {
-			if err := src.Close(); err != nil {
-				log.Tracef("unable to close source: %+v", err)
-			}
-		}
-	}()
+	defer log.CloseAndLogError(src, "syft source")
 
 	s, err := syft.CreateSBOM(context.Background(), src, config.SBOMOptions)
 	if err != nil {
@@ -37,17 +31,30 @@ func syftProvider(userInput string, config ProviderConfig) ([]Package, Context, 
 		return nil, Context{}, nil, errors.New("no SBOM provided")
 	}
 
-	pkgCatalog := removePackagesByOverlap(s.Artifacts.Packages, s.Relationships, s.Artifacts.LinuxDistribution)
-
 	srcDescription := src.Describe()
 
-	packages := FromCollection(pkgCatalog, config.SynthesisConfig)
+	d, distroDetectionFailed := distroFromSBOM(s, config, applyChannel)
+
+	packages := FromCollection(s.Artifacts.Packages, s.Relationships, config.SynthesisConfig)
 	pkgCtx := Context{
-		Source: &srcDescription,
-		Distro: s.Artifacts.LinuxDistribution,
+		Source:                &srcDescription,
+		Distro:                d,
+		DistroDetectionFailed: distroDetectionFailed,
 	}
 
 	return packages, pkgCtx, s, nil
+}
+
+func distroFromSBOM(s *sbom.SBOM, config ProviderConfig, applyChannel func(*distro.Distro)) (d *distro.Distro, detectionFailed bool) {
+	if config.Distro.Override != nil {
+		d = config.Distro.Override
+	} else {
+		d = distro.FromRelease(s.Artifacts.LinuxDistribution, config.Distro.FixChannels)
+		applyChannel(d)
+		// detection failed if we had linux release info but couldn't determine distro type
+		detectionFailed = s.Artifacts.LinuxDistribution != nil && d == nil
+	}
+	return d, detectionFailed
 }
 
 func getSource(userInput string, config ProviderConfig) (source.Source, error) {
@@ -64,11 +71,15 @@ func getSource(userInput string, config ProviderConfig) (source.Source, error) {
 		}
 	}
 
-	var sources []string
-	schemeSource, newUserInput := stereoscope.ExtractSchemeSource(userInput, allSourceTags()...)
-	if schemeSource != "" {
-		sources = []string{schemeSource}
-		userInput = newUserInput
+	// prioritize explicitly specified sources from --from flag
+	sources := config.Sources
+	if len(sources) == 0 {
+		// fallback to extracting from scheme if --from not specified (for backward compatibility)
+		schemeSource, newUserInput := stereoscope.ExtractSchemeSource(userInput, allSourceTags()...)
+		if schemeSource != "" {
+			sources = []string{schemeSource}
+			userInput = newUserInput
+		}
 	}
 
 	return syft.GetSource(context.Background(), userInput, syft.DefaultGetSourceConfig().

@@ -26,12 +26,21 @@ func TestCmd(t *testing.T) {
 			},
 		},
 		{
+			name: "empty-string-arg-shows-help",
+			args: []string{""},
+			assertions: []traitAssertion{
+				assertInOutput("an image/directory argument is required"),                              // specific error that should be shown
+				assertInOutput("A vulnerability scanner for container images, filesystems, and SBOMs"), // excerpt from help description
+				assertFailingReturnCode,
+			},
+		},
+		{
 			name: "ensure valid descriptor",
 			args: []string{getFixtureImage(t, "image-bare"), "-o", "json"},
 			assertions: []traitAssertion{
-				assertInOutput(`"check-for-app-update": false`), // assert existence of the app config block
-				assertInOutput(`"db": {`),                       // assert existence of the db status block
-				assertInOutput(`"built":`),                      // assert existence of the db status block
+				assertInOutput(`"check-for-app-update":`), // assert existence of the app config block
+				assertInOutput(`"db":`),                   // assert existence of the db status block
+				assertInOutput(`"built":`),                // assert existence of the db status block
 			},
 		},
 		{
@@ -70,10 +79,10 @@ func TestCmd(t *testing.T) {
 		{
 			name: "reason for ignored vulnerabilities is available in the template",
 			args: []string{
-				"sbom:" + filepath.Join("test-fixtures", "test-ignore-reason", "sbom.json"),
-				"-c", filepath.Join("test-fixtures", "test-ignore-reason", "config-with-ignore.yaml"),
+				"sbom:" + filepath.Join("testdata", "test-ignore-reason", "sbom.json"),
+				"-c", filepath.Join("testdata", "test-ignore-reason", "config-with-ignore.yaml"),
 				"-o", "template",
-				"-t", filepath.Join("test-fixtures", "test-ignore-reason", "template-with-ignore-reasons"),
+				"-t", filepath.Join("testdata", "test-ignore-reason", "template-with-ignore-reasons"),
 			},
 			assertions: []traitAssertion{
 				assertInOutput("CVE-2021-42385 (test reason for vulnerability being ignored)"),
@@ -82,7 +91,7 @@ func TestCmd(t *testing.T) {
 		},
 		{
 			name: "ignore-states wired up",
-			args: []string{"./test-fixtures/sbom-grype-source.json", "--ignore-states", "unknown"},
+			args: []string{"./testdata/sbom-grype-source.json", "--ignore-states", "unknown"},
 			assertions: []traitAssertion{
 				assertSucceedingReturnCode,
 				assertRowInStdOut([]string{"Pygments", "2.6.1", "2.7.4", "python", "GHSA-pq64-v7f5-gqh8", "High"}),
@@ -91,7 +100,7 @@ func TestCmd(t *testing.T) {
 		},
 		{
 			name: "ignore-states wired up - ignore fixed",
-			args: []string{"./test-fixtures/sbom-grype-source.json", "--ignore-states", "fixed"},
+			args: []string{"./testdata/sbom-grype-source.json", "--ignore-states", "fixed"},
 			assertions: []traitAssertion{
 				assertSucceedingReturnCode,
 				assertRowInStdOut([]string{"libvncserver", "0.9.9", "apk", "CVE-2014-6052", "High"}),
@@ -100,10 +109,19 @@ func TestCmd(t *testing.T) {
 		},
 		{
 			name: "ignore-states wired up - ignore fixed, show suppressed",
-			args: []string{"./test-fixtures/sbom-grype-source.json", "--ignore-states", "fixed", "--show-suppressed"},
+			args: []string{"./testdata/sbom-grype-source.json", "--ignore-states", "fixed", "--show-suppressed"},
 			assertions: []traitAssertion{
 				assertSucceedingReturnCode,
 				assertRowInStdOut([]string{"Pygments", "2.6.1", "2.7.4", "python", "GHSA-pq64-v7f5-gqh8", "High", "(suppressed)"}),
+			},
+		},
+		{
+			// from: https://github.com/anchore/grype/issues/2412 we need to ensure that explicit ignores in code don't break
+			name: "explicit ignores wired up",
+			args: []string{getFixtureImage(t, "image-java-subprocess")},
+			assertions: []traitAssertion{
+				assertSucceedingReturnCode,
+				assertNotInOutput("CVE-2023-45853"),
 			},
 		},
 	}

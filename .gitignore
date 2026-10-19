@@ -1,7 +1,23 @@
+# AI
+.claude
+CLAUDE.MD
+
 # local development tailoring
 go.work
 go.work.sum
 .tool-versions
+.mise.toml
+.env
+.jj/
+mise.toml
+specs
+*.xxh64
+.context
+hack/
+
+# AI and LLM related files
+CLAUDE.md
+.claude
 
 # app configuration
 /.grype.yaml
@@ -16,10 +32,14 @@ bin/
 /snapshot
 /.tool
 /.task
+/specs
+/extractor
+/manager
+.make/.make
 
 # changelog generation
-CHANGELOG.md
-VERSION
+/CHANGELOG.md
+/VERSION
 
 # IDE configuration
 .vscode/
@@ -33,13 +53,16 @@ VERSION
 coverage.txt
 *.log
 .server
+**/testdata/cache/
 
 # grype-db related
 /metadata.json
 /listing.json
 *.db
 *.db-journal
-!**/test-fixtures/**/*.db
+!**/testdata/**/*.db
+!**/testdata/**/bin/
+!**/testdata/**/*.jar
 
 # probable archives
 .images

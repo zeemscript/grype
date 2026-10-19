@@ -3,26 +3,22 @@ package sarif
 import (
 	"bytes"
 	"flag"
-	"fmt"
-	"os/exec"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/anchore/clio"
-	"github.com/anchore/go-testutils"
-	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/presenter/internal"
 	"github.com/anchore/grype/grype/presenter/models"
-	"github.com/anchore/grype/grype/vulnerability"
+	"github.com/anchore/grype/internal/testutils"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
 )
 
-var updateSnapshot = flag.Bool("update-sarif", false, "update .golden files for sarif presenters")
-var validatorImage = "ghcr.io/anchore/sarif-validator:0.1.0@sha256:a0729d695e023740f5df6bcb50d134e88149bea59c63a896a204e88f62b564c6"
+var updateSnapshot = flag.Bool("update", false, "update .golden files for sarif presenters")
 
 func TestSarifPresenter(t *testing.T) {
 	tests := []struct {
@@ -40,20 +36,10 @@ func TestSarifPresenter(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			var buffer bytes.Buffer
-			_, matches, packages, context, metadataProvider, _, _ := internal.GenerateAnalysis(t, tc.scheme)
 
-			pb := models.PresenterConfig{
-				ID: clio.Identification{
-					Name: "grype",
-				},
-				Matches:          matches,
-				Packages:         packages,
-				Context:          context,
-				MetadataProvider: metadataProvider,
-			}
+			pb := internal.GeneratePresenterConfig(t, tc.scheme)
 
 			pres := NewPresenter(pb)
 			err := pres.Present(&buffer)
@@ -70,14 +56,17 @@ func TestSarifPresenter(t *testing.T) {
 			actual = internal.Redact(actual)
 			expected = internal.Redact(expected)
 
-			if !bytes.Equal(expected, actual) {
-				assert.JSONEq(t, string(expected), string(actual))
+			if d := cmp.Diff(string(expected), string(actual)); d != "" {
+				t.Fatalf("(-want +got):\n%s", d)
 			}
 		})
 	}
 }
 
 func Test_SarifIsValid(t *testing.T) {
+	sch, err := jsonschema.NewCompiler().Compile("testdata/sarif-schema-2.1.0.json")
+	require.NoError(t, err)
+
 	tests := []struct {
 		name   string
 		scheme internal.SyftSource
@@ -95,36 +84,18 @@ func Test_SarifIsValid(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var buffer bytes.Buffer
-			_, matches, packages, context, metadataProvider, _, _ := internal.GenerateAnalysis(t, tc.scheme)
 
-			pb := models.PresenterConfig{
-				ID: clio.Identification{
-					Name: "grype",
-				},
-				Matches:          matches,
-				Packages:         packages,
-				Context:          context,
-				MetadataProvider: metadataProvider,
-			}
+			pb := internal.GeneratePresenterConfig(t, tc.scheme)
 
 			pres := NewPresenter(pb)
 			err := pres.Present(&buffer)
 			require.NoError(t, err)
 
-			cmd := exec.Command("docker", "run", "--rm", "-i", validatorImage)
+			inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(buffer.Bytes()))
+			require.NoError(t, err)
 
-			out := bytes.Buffer{}
-			cmd.Stdout = &out
-			cmd.Stderr = &out
-
-			// pipe to the docker command
-			cmd.Stdin = &buffer
-
-			err = cmd.Run()
-			if err != nil || cmd.ProcessState.ExitCode() != 0 {
-				// valid
-				t.Fatalf("error validating SARIF document: %s", out.String())
-			}
+			err = sch.Validate(inst)
+			require.NoError(t, err, "SARIF output does not conform to schema")
 		})
 	}
 }
@@ -227,14 +198,14 @@ func Test_locationPath(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			pres := createDirPresenter(t)
-			pres.src = &source.Description{
+			pres.src = source.Description{
 				Metadata: test.metadata,
 			}
 
-			path := pres.packagePath(pkg.Package{
+			path := pres.packagePath(models.Package{
 				Locations: file.NewLocationSet(
 					file.NewVirtualLocation(test.real, test.virtual),
-				),
+				).ToSlice(),
 			})
 
 			assert.Equal(t, test.expected, path)
@@ -243,22 +214,14 @@ func Test_locationPath(t *testing.T) {
 }
 
 func createDirPresenter(t *testing.T) *Presenter {
-	_, matches, packages, _, metadataProvider, _, _ := internal.GenerateAnalysis(t, internal.DirectorySource)
 	d := t.TempDir()
-	s, err := directorysource.NewFromPath(d)
+	newSrc, err := directorysource.NewFromPath(d)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	desc := s.Describe()
-	pb := models.PresenterConfig{
-		Matches:          matches,
-		Packages:         packages,
-		MetadataProvider: metadataProvider,
-		Context: pkg.Context{
-			Source: &desc,
-		},
-	}
+	pb := internal.GeneratePresenterConfig(t, internal.DirectorySource)
+	pb.SBOM.Source = newSrc.Describe()
 
 	pres := NewPresenter(pb)
 
@@ -290,18 +253,10 @@ func TestToSarifReport(t *testing.T) {
 	}
 
 	for _, tc := range tt {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, matches, packages, context, metadataProvider, _, _ := internal.GenerateAnalysis(t, tc.scheme)
-
-			pb := models.PresenterConfig{
-				Matches:          matches,
-				Packages:         packages,
-				MetadataProvider: metadataProvider,
-				Context:          context,
-			}
+			pb := internal.GeneratePresenterConfig(t, tc.scheme)
 
 			pres := NewPresenter(pb)
 
@@ -323,6 +278,7 @@ func TestToSarifReport(t *testing.T) {
 			assert.Len(t, run.Results, 2)
 			result := run.Results[0]
 			assert.Equal(t, "CVE-1999-0001-package-1", *result.RuleID)
+			assert.Equal(t, "note", *result.Level)
 			assert.Len(t, result.Locations, 1)
 			location := result.Locations[0]
 			expectedLocation, ok := tc.locations[*result.RuleID]
@@ -333,6 +289,7 @@ func TestToSarifReport(t *testing.T) {
 
 			result = run.Results[1]
 			assert.Equal(t, "CVE-1999-0002-package-2", *result.RuleID)
+			assert.Equal(t, "error", *result.Level)
 			assert.Len(t, result.Locations, 1)
 			location = result.Locations[0]
 			expectedLocation, ok = tc.locations[*result.RuleID]
@@ -345,68 +302,58 @@ func TestToSarifReport(t *testing.T) {
 
 }
 
-type NilMetadataProvider struct{}
-
-func (m *NilMetadataProvider) GetMetadata(_, _ string) (*vulnerability.Metadata, error) {
-	return nil, nil
-}
-
-type MockMetadataProvider struct{}
-
-func (m *MockMetadataProvider) GetMetadata(id, namespace string) (*vulnerability.Metadata, error) {
-	cvss := func(id string, namespace string, scores ...float64) vulnerability.Metadata {
-		values := make([]vulnerability.Cvss, len(scores))
-		for _, score := range scores {
-			values = append(values, vulnerability.Cvss{
-				Metrics: vulnerability.CvssMetrics{
-					BaseScore: score,
-				},
-			})
-		}
-		return vulnerability.Metadata{
-			ID:        id,
-			Namespace: namespace,
-			Cvss:      values,
-		}
-	}
-	values := []vulnerability.Metadata{
-		cvss("1", "nvd:cpe", 1),
-		cvss("1", "not-nvd", 2),
-		cvss("2", "not-nvd", 3, 4),
-	}
-	for _, v := range values {
-		if v.ID == id && v.Namespace == namespace {
-			return &v, nil
-		}
-	}
-	return nil, fmt.Errorf("not found")
-}
-
-func Test_cvssScoreWithNilMetadata(t *testing.T) {
-	pres := Presenter{
-		metadataProvider: &NilMetadataProvider{},
-	}
-	score := pres.cvssScore(vulnerability.Vulnerability{
-		ID:        "id",
-		Namespace: "namespace",
+func Test_cvssScoreWithMissingMetadata(t *testing.T) {
+	score := cvssScore(models.Match{
+		Vulnerability: models.Vulnerability{
+			VulnerabilityMetadata: models.VulnerabilityMetadata{
+				ID:        "id",
+				Namespace: "namespace",
+			},
+		},
 	})
 	assert.Equal(t, float64(-1), score)
 }
 
 func Test_cvssScore(t *testing.T) {
+
+	cvss := func(id string, namespace string, scores ...float64) models.VulnerabilityMetadata {
+		values := make([]models.Cvss, 0, len(scores))
+		for _, score := range scores {
+			values = append(values, models.Cvss{
+				Metrics: models.CvssMetrics{
+					BaseScore: score,
+				},
+			})
+		}
+		return models.VulnerabilityMetadata{
+			ID:        id,
+			Namespace: namespace,
+			Cvss:      values,
+		}
+	}
+
+	nvd1 := cvss("1", "nvd:cpe", 1)
+	notNvd1 := cvss("1", "not-nvd", 2)
+	notNvd2 := cvss("2", "not-nvd", 3, 4)
+
 	tests := []struct {
-		name          string
-		vulnerability vulnerability.Vulnerability
-		expected      float64
+		name     string
+		match    models.Match
+		expected float64
 	}{
 		{
 			name: "none",
-			vulnerability: vulnerability.Vulnerability{
-				ID: "4",
-				RelatedVulnerabilities: []vulnerability.Reference{
+			match: models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: models.VulnerabilityMetadata{
+						ID: "4",
+					},
+				},
+				RelatedVulnerabilities: []models.VulnerabilityMetadata{
 					{
 						ID:        "7",
 						Namespace: "nvd:cpe",
+						// intentionally missing info...
 					},
 				},
 			},
@@ -414,49 +361,45 @@ func Test_cvssScore(t *testing.T) {
 		},
 		{
 			name: "direct",
-			vulnerability: vulnerability.Vulnerability{
-				ID:        "2",
-				Namespace: "not-nvd",
-				RelatedVulnerabilities: []vulnerability.Reference{
-					{
-						ID:        "1",
-						Namespace: "nvd:cpe",
-					},
+			match: models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: notNvd2,
+				},
+				RelatedVulnerabilities: []models.VulnerabilityMetadata{
+					nvd1,
 				},
 			},
 			expected: 4,
 		},
 		{
 			name: "related not nvd",
-			vulnerability: vulnerability.Vulnerability{
-				ID:        "1",
-				Namespace: "nvd:cpe",
-				RelatedVulnerabilities: []vulnerability.Reference{
-					{
-						ID:        "1",
-						Namespace: "nvd:cpe",
-					},
-					{
-						ID:        "1",
-						Namespace: "not-nvd",
-					},
+			match: models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: nvd1,
+				},
+				RelatedVulnerabilities: []models.VulnerabilityMetadata{
+					nvd1,
+					notNvd1,
 				},
 			},
 			expected: 2,
 		},
 		{
 			name: "related nvd",
-			vulnerability: vulnerability.Vulnerability{
-				ID:        "4",
-				Namespace: "not-nvd",
-				RelatedVulnerabilities: []vulnerability.Reference{
-					{
-						ID:        "1",
-						Namespace: "nvd:cpe",
+			match: models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: models.VulnerabilityMetadata{
+						ID:        "4",
+						Namespace: "not-nvd",
+						// intentionally missing info...
 					},
+				},
+				RelatedVulnerabilities: []models.VulnerabilityMetadata{
+					nvd1,
 					{
 						ID:        "7",
 						Namespace: "not-nvd",
+						// intentionally missing info...
 					},
 				},
 			},
@@ -466,11 +409,106 @@ func Test_cvssScore(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pres := Presenter{
-				metadataProvider: &MockMetadataProvider{},
-			}
-			score := pres.cvssScore(test.vulnerability)
+			score := cvssScore(test.match)
 			assert.Equal(t, test.expected, score)
+		})
+	}
+}
+
+func Test_findDescription(t *testing.T) {
+	tests := []struct {
+		name     string
+		match    models.Match
+		expected string
+	}{
+		{
+			name: "no description anywhere",
+			match: models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: models.VulnerabilityMetadata{ID: "CVE-1"},
+				},
+			},
+			expected: "",
+		},
+		{
+			name: "description in primary vulnerability",
+			match: models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: models.VulnerabilityMetadata{
+						ID:          "CVE-1",
+						Description: "primary description",
+					},
+				},
+				RelatedVulnerabilities: []models.VulnerabilityMetadata{
+					{ID: "CVE-2", Description: "related description"},
+				},
+			},
+			expected: "primary description",
+		},
+		{
+			name: "first non-empty related description wins",
+			match: models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: models.VulnerabilityMetadata{ID: "CVE-1"},
+				},
+				RelatedVulnerabilities: []models.VulnerabilityMetadata{
+					{ID: "CVE-2"},
+					{ID: "CVE-3", Description: "second related"},
+					{ID: "CVE-4", Description: "third related"},
+				},
+			},
+			expected: "second related",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, findDescription(test.match))
+		})
+	}
+}
+
+func Test_helpURI(t *testing.T) {
+	tests := []struct {
+		name       string
+		dataSource string
+		urls       []string
+		expected   string
+	}{
+		{
+			name:       "dataSource preferred over urls",
+			dataSource: "https://nvd.nist.gov/vuln/detail/CVE-2021-1234",
+			urls:       []string{"https://example.com/advisory"},
+			expected:   "https://nvd.nist.gov/vuln/detail/CVE-2021-1234",
+		},
+		{
+			name:     "first url used when no dataSource",
+			urls:     []string{"https://github.com/advisories/GHSA-xxxx-yyyy-zzzz", "https://example.com/other"},
+			expected: "https://github.com/advisories/GHSA-xxxx-yyyy-zzzz",
+		},
+		{
+			name:       "dataSource used when no urls",
+			dataSource: "https://nvd.nist.gov/vuln/detail/CVE-2021-5678",
+			expected:   "https://nvd.nist.gov/vuln/detail/CVE-2021-5678",
+		},
+		{
+			name:     "fallback to grype repo when no dataSource or urls",
+			expected: "https://github.com/anchore/grype",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := models.Match{
+				Vulnerability: models.Vulnerability{
+					VulnerabilityMetadata: models.VulnerabilityMetadata{
+						ID:         "CVE-2021-0000",
+						DataSource: tc.dataSource,
+						URLs:       tc.urls,
+					},
+				},
+			}
+			assert.Equal(t, tc.expected, helpURI(m))
 		})
 	}
 }
@@ -500,10 +538,12 @@ func Test_imageShortPathName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := imageShortPathName(&source.Description{
-				Name:     test.in,
-				Metadata: nil,
-			})
+			got := imageShortPathName(
+				source.Description{
+					Name:     test.in,
+					Metadata: nil,
+				},
+			)
 
 			assert.Equal(t, test.expected, got)
 		})

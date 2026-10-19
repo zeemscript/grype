@@ -10,30 +10,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/anchore/go-testutils"
 	"github.com/anchore/grype/grype/presenter/internal"
-	"github.com/anchore/grype/grype/presenter/models"
+	"github.com/anchore/grype/internal/testutils"
 )
 
 var update = flag.Bool("update", false, "update the *.golden files for template presenters")
 
 func TestPresenter_Present(t *testing.T) {
-	_, matches, packages, context, metadataProvider, appConfig, dbStatus := internal.GenerateAnalysis(t, internal.ImageSource)
-
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	templateFilePath := path.Join(workingDirectory, "./test-fixtures/test.template")
+	templateFilePath := path.Join(workingDirectory, "./testdata/test.template")
 
-	pb := models.PresenterConfig{
-		Matches:          matches,
-		Packages:         packages,
-		Context:          context,
-		MetadataProvider: metadataProvider,
-		AppConfig:        appConfig,
-		DBStatus:         dbStatus,
-	}
+	pb := internal.GeneratePresenterConfig(t, internal.ImageSource)
 
 	templatePresenter := NewPresenter(pb, templateFilePath)
 
@@ -53,21 +43,13 @@ func TestPresenter_Present(t *testing.T) {
 }
 
 func TestPresenter_SprigDate_Fails(t *testing.T) {
-	_, matches, packages, context, metadataProvider, appConfig, dbStatus := internal.GenerateAnalysis(t, internal.ImageSource)
 	workingDirectory, err := os.Getwd()
 	require.NoError(t, err)
 
 	// this template has the generic sprig date function, which is intentionally not supported for security reasons
-	templateFilePath := path.Join(workingDirectory, "./test-fixtures/test.template.sprig.date")
+	templateFilePath := path.Join(workingDirectory, "./testdata/test.template.sprig.date")
 
-	pb := models.PresenterConfig{
-		Matches:          matches,
-		Packages:         packages,
-		Context:          context,
-		MetadataProvider: metadataProvider,
-		AppConfig:        appConfig,
-		DBStatus:         dbStatus,
-	}
+	pb := internal.GeneratePresenterConfig(t, internal.ImageSource)
 
 	templatePresenter := NewPresenter(pb, templateFilePath)
 

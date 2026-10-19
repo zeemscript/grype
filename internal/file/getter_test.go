@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/anchore/clio"
 )
 
 func TestGetter_GetFile(t *testing.T) {
@@ -45,7 +47,7 @@ func TestGetter_GetFile(t *testing.T) {
 				tc.prepareClient(httpClient)
 			}
 
-			getter := NewGetter(httpClient)
+			getter := NewGetter(testID, httpClient)
 			requestURL := createRequestURL(t, server, requestPath)
 
 			tempDir := t.TempDir()
@@ -72,7 +74,7 @@ func TestGetter_GetToDir_FilterNonArchivesWired(t *testing.T) {
 
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
-			test.assert(t, NewGetter(nil).GetToDir(t.TempDir(), test.source))
+			test.assert(t, NewGetter(testID, nil).GetToDir(t.TempDir(), test.source))
 		})
 	}
 }
@@ -138,7 +140,7 @@ func TestGetter_GetToDir_CertConcerns(t *testing.T) {
 				tc.prepareClient(httpClient)
 			}
 
-			getter := NewGetter(httpClient)
+			getter := NewGetter(testID, httpClient)
 			requestURL := createRequestURL(t, server, requestPath)
 
 			tempDir := t.TempDir()
@@ -149,11 +151,11 @@ func TestGetter_GetToDir_CertConcerns(t *testing.T) {
 	}
 }
 
-func assertUnknownAuthorityError(t assert.TestingT, err error, _ ...interface{}) bool {
+func assertUnknownAuthorityError(t assert.TestingT, err error, _ ...any) bool {
 	return assert.ErrorAs(t, err, &x509.UnknownAuthorityError{})
 }
 
-func assertErrNonArchiveSource(t assert.TestingT, err error, _ ...interface{}) bool {
+func assertErrNonArchiveSource(t assert.TestingT, err error, _ ...any) bool {
 	return assert.ErrorIs(t, err, ErrNonArchiveSource)
 }
 
@@ -191,6 +193,11 @@ func withResponseForPath(t *testing.T, path string, response []byte) muxOption {
 			}
 		})
 	}
+}
+
+var testID = clio.Identification{
+	Name:    "test-app",
+	Version: "v0.5.3",
 }
 
 func newTestServer(t *testing.T, muxOptions ...muxOption) *httptest.Server {

@@ -4,16 +4,18 @@ import (
 	"regexp"
 	"testing"
 
-	grypeDb "github.com/anchore/grype/grype/db/v5"
+	"github.com/stretchr/testify/require"
+
+	"github.com/anchore/clio"
+	"github.com/anchore/grype/grype/distro"
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/presenter/models"
-	"github.com/anchore/grype/grype/vex"
+	vexStatus "github.com/anchore/grype/grype/vex/status"
 	"github.com/anchore/grype/grype/vulnerability"
 	"github.com/anchore/stereoscope/pkg/image"
 	"github.com/anchore/syft/syft/cpe"
 	"github.com/anchore/syft/syft/file"
-	"github.com/anchore/syft/syft/linux"
 	syftPkg "github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/sbom"
 	syftSource "github.com/anchore/syft/syft/source"
@@ -30,24 +32,60 @@ const (
 
 type SyftSource string
 
-func GenerateAnalysis(t *testing.T, scheme SyftSource) (*sbom.SBOM, match.Matches, []pkg.Package, pkg.Context, vulnerability.MetadataProvider, interface{}, interface{}) {
-	t.Helper()
+// Fixture values shared across the generated analysis documents below. These are
+// deliberately stable: the presenter snapshot tests assert against them verbatim.
+const (
+	appName = "grype"
 
-	s := &sbom.SBOM{
-		Artifacts: sbom.Artifacts{
-			Packages: syftPkg.NewCollection(generatePackages(t)...),
-		},
+	cve19990001 = "CVE-1999-0001"
+	cve19990002 = "CVE-1999-0002"
+	cve19990004 = "CVE-1999-0004"
+
+	nvdSource   = "nvd"
+	cvssType    = "CVSS"
+	cvssVersion = "3.1"
+	sourceTwo   = "source-2"
+
+	cpeKey        = "cpe"
+	constraintKey = "constraint"
+	someCPE       = "somecpe"
+
+	dockerLayerMediaType = "application/vnd.docker.image.rootfs.diff.tar.gzip"
+)
+
+func GeneratePresenterConfig(t *testing.T, scheme SyftSource) models.PresenterConfig {
+	s, doc := GenerateAnalysis(t, scheme)
+	return models.PresenterConfig{
+		ID:       clio.Identification{Name: appName, Version: "[not provided]"},
+		Document: doc,
+		SBOM:     s,
+		Pretty:   true,
 	}
-
-	grypePackages := pkg.FromCollection(s.Artifacts.Packages, pkg.SynthesisConfig{})
-
-	matches := generateMatches(t, grypePackages[0], grypePackages[1])
-	context := generateContext(t, scheme)
-
-	return s, matches, grypePackages, context, models.NewMetadataMock(), nil, nil
 }
 
-func GenerateAnalysisWithIgnoredMatches(t *testing.T, scheme SyftSource) (match.Matches, []match.IgnoredMatch, []pkg.Package, pkg.Context, vulnerability.MetadataProvider, interface{}, interface{}) {
+func GenerateAnalysis(t *testing.T, scheme SyftSource) (*sbom.SBOM, models.Document) {
+	t.Helper()
+
+	context := generateContext(t, scheme)
+
+	s := &sbom.SBOM{
+		Artifacts: sbom.Artifacts{
+			Packages: syftPkg.NewCollection(generatePackages(t)...),
+		},
+		Source: *context.Source,
+	}
+
+	grypePackages := pkg.FromPtrs(pkg.FromCollection(s.Artifacts.Packages, s.Relationships, pkg.SynthesisConfig{}))
+
+	matches := generateMatches(t, grypePackages[0], grypePackages[1])
+
+	doc, err := models.NewDocument(clio.Identification{Name: appName, Version: "[not provided]"}, grypePackages, context, matches, nil, models.NewMetadataMock(), nil, nil, models.SortByPackage, true, nil)
+	require.NoError(t, err)
+
+	return s, doc
+}
+
+func GenerateAnalysisWithIgnoredMatches(t *testing.T, scheme SyftSource) models.Document {
 	t.Helper()
 
 	s := &sbom.SBOM{
@@ -56,13 +94,15 @@ func GenerateAnalysisWithIgnoredMatches(t *testing.T, scheme SyftSource) (match.
 		},
 	}
 
-	grypePackages := pkg.FromCollection(s.Artifacts.Packages, pkg.SynthesisConfig{})
+	grypePackages := pkg.FromPtrs(pkg.FromCollection(s.Artifacts.Packages, s.Relationships, pkg.SynthesisConfig{}))
 
 	matches := generateMatches(t, grypePackages[0], grypePackages[1])
 	ignoredMatches := generateIgnoredMatches(t, grypePackages[1])
 	context := generateContext(t, scheme)
 
-	return matches, ignoredMatches, grypePackages, context, models.NewMetadataMock(), nil, nil
+	doc, err := models.NewDocument(clio.Identification{Name: appName, Version: "devel"}, grypePackages, context, matches, ignoredMatches, models.NewMetadataMock(), nil, nil, models.SortByPackage, true, nil)
+	require.NoError(t, err)
+	return doc
 }
 
 func Redact(s []byte) []byte {
@@ -71,25 +111,54 @@ func Redact(s []byte) []byte {
 	refPattern := regexp.MustCompile(`ref="[a-zA-Z0-9\-:]+"`)
 	rfc3339Pattern := regexp.MustCompile(`([0-9]+)-(0[1-9]|1[012])-(0[1-9]|[12][0-9]|3[01])[Tt]([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9]|60)(\.[0-9]+)?(([Zz])|([+|\-]([01][0-9]|2[0-3]):[0-5][0-9]))`)
 	cycloneDxBomRefPattern := regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	tempDirPattern := regexp.MustCompile(`/tmp/[^"]+`)
+	macTempDirPattern := regexp.MustCompile(`/var/folders/[^"]+`)
+	// json-escaped windows paths (e.g. "C:\\Users\\...\\Temp\\...")
+	windowsTempDirPattern := regexp.MustCompile(`[A-Za-z]:\\\\[^"]+`)
 
-	for _, pattern := range []*regexp.Regexp{serialPattern, rfc3339Pattern, refPattern, uuidPattern, cycloneDxBomRefPattern} {
+	for _, pattern := range []*regexp.Regexp{serialPattern, rfc3339Pattern, refPattern, uuidPattern, cycloneDxBomRefPattern, tempDirPattern, macTempDirPattern, windowsTempDirPattern} {
 		s = pattern.ReplaceAll(s, []byte(""))
 	}
 	return s
 }
 
-func generateMatches(t *testing.T, p1, p2 pkg.Package) match.Matches {
+func generateMatches(t *testing.T, p1, p2 pkg.Package) match.Matches { // nolint:funlen
 	t.Helper()
 
 	matches := []match.Match{
 		{
 
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-1999-0001",
-				Namespace: "source-1",
+				Reference: vulnerability.Reference{
+					ID:        cve19990001,
+					Namespace: "source-1",
+				},
 				Fix: vulnerability.Fix{
-					Versions: []string{"the-next-version"},
-					State:    grypeDb.FixedState,
+					Versions: []string{"1.2.1", "2.1.3", "3.4.0"},
+					State:    vulnerability.FixStateFixed,
+				},
+				Metadata: &vulnerability.Metadata{
+					ID:       cve19990001,
+					Severity: "Low",
+					Cvss: []vulnerability.Cvss{
+						{
+							Source:  nvdSource,
+							Type:    cvssType,
+							Version: cvssVersion,
+							Vector:  "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:H",
+							Metrics: vulnerability.CvssMetrics{
+								BaseScore: 8.2,
+							},
+						},
+					},
+					KnownExploited: nil,
+					EPSS: []vulnerability.EPSS{
+						{
+							CVE:        cve19990001,
+							EPSS:       0.03,
+							Percentile: 0.42,
+						},
+					},
 				},
 			},
 			Package: p1,
@@ -97,14 +166,14 @@ func generateMatches(t *testing.T, p1, p2 pkg.Package) match.Matches {
 				{
 					Type:    match.ExactDirectMatch,
 					Matcher: match.DpkgMatcher,
-					SearchedBy: map[string]interface{}{
+					SearchedBy: map[string]any{
 						"distro": map[string]string{
 							"type":    "ubuntu",
 							"version": "20.04",
 						},
 					},
-					Found: map[string]interface{}{
-						"constraint": ">= 20",
+					Found: map[string]any{
+						constraintKey: ">= 20",
 					},
 				},
 			},
@@ -112,19 +181,49 @@ func generateMatches(t *testing.T, p1, p2 pkg.Package) match.Matches {
 		{
 
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-1999-0002",
-				Namespace: "source-2",
+				Reference: vulnerability.Reference{
+					ID:        cve19990002,
+					Namespace: sourceTwo,
+				},
+				Metadata: &vulnerability.Metadata{
+					ID:       cve19990002,
+					Severity: "Critical",
+					Cvss: []vulnerability.Cvss{
+						{
+							Source:  nvdSource,
+							Type:    cvssType,
+							Version: cvssVersion,
+							Vector:  "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H",
+							Metrics: vulnerability.CvssMetrics{
+								BaseScore: 8.5,
+							},
+						},
+					},
+					KnownExploited: []vulnerability.KnownExploited{
+						{
+							CVE:                        cve19990002,
+							KnownRansomwareCampaignUse: "Known",
+						},
+					},
+					EPSS: []vulnerability.EPSS{
+						{
+							CVE:        cve19990002,
+							EPSS:       0.08,
+							Percentile: 0.53,
+						},
+					},
+				},
 			},
 			Package: p2,
 			Details: []match.Detail{
 				{
 					Type:    match.ExactIndirectMatch,
 					Matcher: match.DpkgMatcher,
-					SearchedBy: map[string]interface{}{
-						"cpe": "somecpe",
+					SearchedBy: map[string]any{
+						cpeKey: someCPE,
 					},
-					Found: map[string]interface{}{
-						"constraint": "somecpe",
+					Found: map[string]any{
+						constraintKey: someCPE,
 					},
 				},
 			},
@@ -144,22 +243,47 @@ func generateIgnoredMatches(t *testing.T, p pkg.Package) []match.IgnoredMatch {
 		{
 			Match: match.Match{
 				Vulnerability: vulnerability.Vulnerability{
-					ID:        "CVE-1999-0001",
-					Namespace: "source-1",
+					Reference: vulnerability.Reference{
+						ID:        cve19990001,
+						Namespace: "source-1",
+					},
+					Metadata: &vulnerability.Metadata{
+						ID:       cve19990001,
+						Severity: "Low",
+						Cvss: []vulnerability.Cvss{
+							{
+								Source:  nvdSource,
+								Type:    cvssType,
+								Version: cvssVersion,
+								Vector:  "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:H",
+								Metrics: vulnerability.CvssMetrics{
+									BaseScore: 8.2,
+								},
+							},
+						},
+						KnownExploited: nil,
+						EPSS: []vulnerability.EPSS{
+							{
+								CVE:        cve19990001,
+								EPSS:       0.03,
+								Percentile: 0.42,
+							},
+						},
+					},
 				},
 				Package: p,
 				Details: []match.Detail{
 					{
 						Type:    match.ExactDirectMatch,
 						Matcher: match.DpkgMatcher,
-						SearchedBy: map[string]interface{}{
+						SearchedBy: map[string]any{
 							"distro": map[string]string{
 								"type":    "ubuntu",
 								"version": "20.04",
 							},
 						},
-						Found: map[string]interface{}{
-							"constraint": ">= 20",
+						Found: map[string]any{
+							constraintKey: ">= 20",
 						},
 					},
 				},
@@ -169,19 +293,49 @@ func generateIgnoredMatches(t *testing.T, p pkg.Package) []match.IgnoredMatch {
 		{
 			Match: match.Match{
 				Vulnerability: vulnerability.Vulnerability{
-					ID:        "CVE-1999-0002",
-					Namespace: "source-2",
+					Reference: vulnerability.Reference{
+						ID:        cve19990002,
+						Namespace: sourceTwo,
+					},
+					Metadata: &vulnerability.Metadata{
+						ID:       cve19990002,
+						Severity: "Critical",
+						Cvss: []vulnerability.Cvss{
+							{
+								Source:  nvdSource,
+								Type:    cvssType,
+								Version: cvssVersion,
+								Vector:  "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H",
+								Metrics: vulnerability.CvssMetrics{
+									BaseScore: 8.5,
+								},
+							},
+						},
+						KnownExploited: []vulnerability.KnownExploited{
+							{
+								CVE:                        cve19990002,
+								KnownRansomwareCampaignUse: "Known",
+							},
+						},
+						EPSS: []vulnerability.EPSS{
+							{
+								CVE:        cve19990002,
+								EPSS:       0.08,
+								Percentile: 0.53,
+							},
+						},
+					},
 				},
 				Package: p,
 				Details: []match.Detail{
 					{
 						Type:    match.ExactDirectMatch,
 						Matcher: match.DpkgMatcher,
-						SearchedBy: map[string]interface{}{
-							"cpe": "somecpe",
+						SearchedBy: map[string]any{
+							cpeKey: someCPE,
 						},
-						Found: map[string]interface{}{
-							"constraint": "somecpe",
+						Found: map[string]any{
+							constraintKey: someCPE,
 						},
 					},
 				},
@@ -191,29 +345,53 @@ func generateIgnoredMatches(t *testing.T, p pkg.Package) []match.IgnoredMatch {
 		{
 			Match: match.Match{
 				Vulnerability: vulnerability.Vulnerability{
-					ID:        "CVE-1999-0004",
-					Namespace: "source-2",
+					Reference: vulnerability.Reference{
+						ID:        cve19990004,
+						Namespace: sourceTwo,
+					},
+					Metadata: &vulnerability.Metadata{
+						ID:       cve19990004,
+						Severity: "High",
+						Cvss: []vulnerability.Cvss{
+							{
+								Source:  nvdSource,
+								Type:    cvssType,
+								Version: cvssVersion,
+								Vector:  "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:L",
+								Metrics: vulnerability.CvssMetrics{
+									BaseScore: 7.2,
+								},
+							},
+						},
+						EPSS: []vulnerability.EPSS{
+							{
+								CVE:        cve19990004,
+								EPSS:       0.03,
+								Percentile: 0.75,
+							},
+						},
+					},
 				},
 				Package: p,
 				Details: []match.Detail{
 					{
 						Type:    match.ExactDirectMatch,
 						Matcher: match.DpkgMatcher,
-						SearchedBy: map[string]interface{}{
-							"cpe": "somecpe",
+						SearchedBy: map[string]any{
+							cpeKey: someCPE,
 						},
-						Found: map[string]interface{}{
-							"constraint": "somecpe",
+						Found: map[string]any{
+							constraintKey: someCPE,
 						},
 					},
 				},
 			},
 			AppliedIgnoreRules: []match.IgnoreRule{
 				{
-					Vulnerability:    "CVE-1999-0004",
+					Vulnerability:    cve19990004,
 					Namespace:        "vex",
 					Package:          match.IgnoreRulePackage{},
-					VexStatus:        string(vex.StatusNotAffected),
+					VexStatus:        string(vexStatus.NotAffected),
 					VexJustification: "this isn't the vulnerability match you're looking for... *waves hand*",
 				},
 			},
@@ -235,22 +413,24 @@ func generatePackages(t *testing.T) []syftPkg.Package {
 				{
 					Attributes: cpe.Attributes{
 						Part:     "a",
-						Vendor:   "anchore",
-						Product:  "engine",
+						Vendor:   "anchore:oss",
+						Product:  "anchore/engine",
 						Version:  "0.9.2",
-						Language: "python",
+						Language: "en",
 					},
 				},
 			},
 			Metadata: syftPkg.RpmDBEntry{
 				Epoch:     &epoch,
 				SourceRpm: "some-source-rpm",
+				Arch:      "x86_64",
 			},
 		},
 		{
 			Name:      "package-2",
 			Version:   "2.2.2",
 			Type:      syftPkg.DebPkg,
+			PURL:      "pkg:deb/package-2@2.2.2",
 			Locations: file.NewLocationSet(file.NewVirtualLocation("/foo/bar/somefile-2.txt", "somefile-2.txt")),
 			CPEs: []cpe.CPE{
 				{
@@ -259,7 +439,7 @@ func generatePackages(t *testing.T) []syftPkg.Package {
 						Vendor:   "anchore",
 						Product:  "engine",
 						Version:  "2.2.2",
-						Language: "python",
+						Language: "en",
 					},
 				},
 			},
@@ -305,21 +485,21 @@ func generateContext(t *testing.T, scheme SyftSource) pkg.Context {
 				{
 					Metadata: image.LayerMetadata{
 						Digest:    "sha256:ca738abb87a8d58f112d3400ebb079b61ceae7dc290beb34bda735be4b1941d5",
-						MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip",
+						MediaType: dockerLayerMediaType,
 						Size:      22,
 					},
 				},
 				{
 					Metadata: image.LayerMetadata{
 						Digest:    "sha256:a05cd9ebf88af96450f1e25367281ab232ac0645f314124fe01af759b93f3006",
-						MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip",
+						MediaType: dockerLayerMediaType,
 						Size:      16,
 					},
 				},
 				{
 					Metadata: image.LayerMetadata{
 						Digest:    "sha256:ab5608d634db2716a297adbfa6a5dd5d8f8f5a7d0cab73649ea7fbb8c8da544f",
-						MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip",
+						MediaType: dockerLayerMediaType,
 						Size:      27,
 					},
 				},
@@ -350,12 +530,13 @@ func generateContext(t *testing.T, scheme SyftSource) pkg.Context {
 
 	return pkg.Context{
 		Source: &desc,
-		Distro: &linux.Release{
-			Name: "centos",
+		Distro: &distro.Distro{
+			Type: "centos",
 			IDLike: []string{
 				"centos",
 			},
-			Version: "8.0",
+			Version:  "8.0",
+			Channels: []string{"eus"}, // a fake EUS-like channel for centOS
 		},
 	}
 }

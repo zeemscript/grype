@@ -6,9 +6,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
-	grypeDb "github.com/anchore/grype/grype/db/v5"
+	"github.com/anchore/grype/grype/internal/ignorereasons"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/vulnerability"
+	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	syftPkg "github.com/anchore/syft/syft/pkg"
 )
@@ -17,10 +18,12 @@ var (
 	allMatches = []Match{
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-123",
-				Namespace: "debian-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-123",
+					Namespace: "debian-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.FixedState,
+					State: vulnerability.FixStateFixed,
 				},
 			},
 			Package: pkg.Package{
@@ -33,10 +36,17 @@ var (
 		},
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-456",
-				Namespace: "ruby-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-456",
+					Namespace: "ruby-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.NotFixedState,
+					State: vulnerability.FixStateNotFixed,
+				},
+				RelatedVulnerabilities: []vulnerability.Reference{
+					{
+						ID: "CVE-123",
+					},
 				},
 			},
 			Package: pkg.Package{
@@ -51,10 +61,12 @@ var (
 		},
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-457",
-				Namespace: "ruby-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-457",
+					Namespace: "ruby-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.WontFixState,
+					State: vulnerability.FixStateWontFix,
 				},
 			},
 			Package: pkg.Package{
@@ -69,10 +81,12 @@ var (
 		},
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-458",
-				Namespace: "ruby-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-458",
+					Namespace: "ruby-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -92,10 +106,12 @@ var (
 		// Direct match, not like a normal kernel header match
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-1",
-				Namespace: "fake-redhat-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-1",
+					Namespace: "fake-redhat-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -115,10 +131,12 @@ var (
 		},
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-2",
-				Namespace: "fake-deb-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-2",
+					Namespace: "fake-deb-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -138,10 +156,12 @@ var (
 		},
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-1",
-				Namespace: "npm-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-1",
+					Namespace: "npm-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -163,10 +183,12 @@ var (
 		// RPM-like match similar to what we see from RedHat
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-2",
-				Namespace: "fake-redhat-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-2",
+					Namespace: "fake-redhat-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -187,10 +209,12 @@ var (
 		// debian-like match, showing the kernel header package name w/embedded version
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-2",
-				Namespace: "fake-debian-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-2",
+					Namespace: "fake-debian-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -208,16 +232,44 @@ var (
 				},
 			},
 		},
+		// linux-like match, similar to what we see from debian\ubuntu
+		{
+			Vulnerability: vulnerability.Vulnerability{
+				Reference: vulnerability.Reference{
+					ID:        "CVE-3",
+					Namespace: "fake-linux-vulns",
+				},
+				Fix: vulnerability.Fix{
+					State: vulnerability.FixStateUnknown,
+				},
+			},
+			Package: pkg.Package{
+				ID:      pkg.ID(uuid.NewString()),
+				Name:    "linux-azure-headers-generic",
+				Version: "5.2.1",
+				Type:    syftPkg.DebPkg,
+				Upstreams: []pkg.UpstreamPackage{
+					{Name: "linux-azure"},
+				},
+			},
+			Details: []Detail{
+				{
+					Type: ExactIndirectMatch,
+				},
+			},
+		},
 	}
 
 	// For testing the match-type and upstream ignore rules
 	packageTypeMatches = []Match{
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-2",
-				Namespace: "fake-redhat-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-2",
+					Namespace: "fake-redhat-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -229,10 +281,12 @@ var (
 		},
 		{
 			Vulnerability: vulnerability.Vulnerability{
-				ID:        "CVE-2",
-				Namespace: "fake-debian-vulns",
+				Reference: vulnerability.Reference{
+					ID:        "CVE-2",
+					Namespace: "fake-debian-vulns",
+				},
 				Fix: vulnerability.Fix{
-					State: grypeDb.UnknownFixState,
+					State: vulnerability.FixStateUnknown,
 				},
 			},
 			Package: pkg.Package{
@@ -323,6 +377,40 @@ func TestApplyIgnoreRules(t *testing.T) {
 			},
 		},
 		{
+			name:       "ignore related matches",
+			allMatches: allMatches,
+			ignoreRules: []IgnoreRule{
+				{
+					Vulnerability:  "CVE-123",
+					IncludeAliases: true,
+				},
+			},
+			expectedRemainingMatches: []Match{
+				allMatches[2],
+				allMatches[3],
+			},
+			expectedIgnoredMatches: []IgnoredMatch{
+				{
+					Match: allMatches[0],
+					AppliedIgnoreRules: []IgnoreRule{
+						{
+							Vulnerability:  "CVE-123",
+							IncludeAliases: true,
+						},
+					},
+				},
+				{
+					Match: allMatches[1],
+					AppliedIgnoreRules: []IgnoreRule{
+						{
+							Vulnerability:  "CVE-123",
+							IncludeAliases: true,
+						},
+					},
+				},
+			},
+		},
+		{
 			name:       "ignore subset of matches",
 			allMatches: allMatches,
 			ignoreRules: []IgnoreRule{
@@ -350,9 +438,9 @@ func TestApplyIgnoreRules(t *testing.T) {
 			name:       "ignore matches without fix",
 			allMatches: allMatches,
 			ignoreRules: []IgnoreRule{
-				{FixState: string(grypeDb.NotFixedState)},
-				{FixState: string(grypeDb.WontFixState)},
-				{FixState: string(grypeDb.UnknownFixState)},
+				{FixState: string(vulnerability.FixStateNotFixed)},
+				{FixState: string(vulnerability.FixStateWontFix)},
+				{FixState: string(vulnerability.FixStateUnknown)},
 			},
 			expectedRemainingMatches: []Match{
 				allMatches[0],
@@ -519,6 +607,11 @@ func TestApplyIgnoreRules(t *testing.T) {
 						UpstreamName: "kernel",
 					},
 				},
+				{
+					Package: IgnoreRulePackage{
+						UpstreamName: "linux-.*",
+					},
+				},
 			},
 			expectedRemainingMatches: []Match{
 				kernelHeadersMatches[1],
@@ -530,6 +623,16 @@ func TestApplyIgnoreRules(t *testing.T) {
 						{
 							Package: IgnoreRulePackage{
 								UpstreamName: "kernel",
+							},
+						},
+					},
+				},
+				{
+					Match: kernelHeadersMatches[2],
+					AppliedIgnoreRules: []IgnoreRule{
+						{
+							Package: IgnoreRulePackage{
+								UpstreamName: "linux-.*",
 							},
 						},
 					},
@@ -574,6 +677,14 @@ func TestApplyIgnoreRules(t *testing.T) {
 					},
 					MatchType: ExactIndirectMatch,
 				},
+				{
+					Package: IgnoreRulePackage{
+						Name:         "linux-.*-headers-.*",
+						UpstreamName: "linux.*",
+						Type:         string(syftPkg.DebPkg),
+					},
+					MatchType: ExactIndirectMatch,
+				},
 			},
 			expectedRemainingMatches: []Match{
 				kernelHeadersMatches[1],
@@ -587,6 +698,19 @@ func TestApplyIgnoreRules(t *testing.T) {
 								Name:         "kernel-headers",
 								UpstreamName: "kernel",
 								Type:         string(syftPkg.RpmPkg),
+							},
+							MatchType: ExactIndirectMatch,
+						},
+					},
+				},
+				{
+					Match: kernelHeadersMatches[2],
+					AppliedIgnoreRules: []IgnoreRule{
+						{
+							Package: IgnoreRulePackage{
+								Name:         "linux-.*-headers-.*",
+								UpstreamName: "linux.*",
+								Type:         string(syftPkg.DebPkg),
 							},
 							MatchType: ExactIndirectMatch,
 						},
@@ -606,6 +730,7 @@ func TestApplyIgnoreRules(t *testing.T) {
 			},
 			expectedRemainingMatches: []Match{
 				kernelHeadersMatches[1],
+				kernelHeadersMatches[2],
 			},
 			expectedIgnoredMatches: []IgnoredMatch{
 				{
@@ -656,7 +781,10 @@ func TestApplyIgnoreRules(t *testing.T) {
 					},
 				},
 			},
-			expectedRemainingMatches: []Match{kernelHeadersMatches[1]},
+			expectedRemainingMatches: []Match{
+				kernelHeadersMatches[1],
+				kernelHeadersMatches[2],
+			},
 			expectedIgnoredMatches: []IgnoredMatch{
 				{
 					Match: kernelHeadersMatches[0],
@@ -692,7 +820,7 @@ func sliceToMatches(s []Match) Matches {
 var (
 	exampleMatch = Match{
 		Vulnerability: vulnerability.Vulnerability{
-			ID: "CVE-2000-1234",
+			Reference: vulnerability.Reference{ID: "CVE-2000-1234"},
 		},
 		Package: pkg.Package{
 			ID:      pkg.ID(uuid.NewString()),
@@ -706,6 +834,421 @@ var (
 		},
 	}
 )
+
+func TestIsRegex(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		// simple strings that should NOT be detected as regex
+		{
+			name:     "simple string",
+			input:    "hello",
+			expected: false,
+		},
+		{
+			name:     "alphanumeric with dashes",
+			input:    "kernel-headers",
+			expected: false,
+		},
+		{
+			name:     "alphanumeric with underscores",
+			input:    "my_package_name",
+			expected: false,
+		},
+		{
+			name:     "version numbers",
+			input:    "1.2.3",
+			expected: false, // dots are no longer considered regex metacharacters
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: false,
+		},
+		{
+			name:     "spaces only",
+			input:    "   ",
+			expected: false,
+		},
+		{
+			name:     "numbers only",
+			input:    "12345",
+			expected: false,
+		},
+		{
+			name:     "letters and numbers",
+			input:    "abc123",
+			expected: false,
+		},
+		{
+			name:     "with slashes",
+			input:    "path/to/file",
+			expected: false,
+		},
+		{
+			name:     "with colons",
+			input:    "namespace:package",
+			expected: false,
+		},
+		{
+			name:     "with at symbol",
+			input:    "user@domain.com",
+			expected: false, // dots are no longer considered regex metacharacters
+		},
+
+		// strings with regex metacharacters that SHOULD be detected as regex
+		{
+			name:     "caret at start",
+			input:    "^start",
+			expected: true,
+		},
+		{
+			name:     "dollar at end",
+			input:    "end$",
+			expected: true,
+		},
+		{
+			name:     "asterisk wildcard",
+			input:    "test*",
+			expected: true,
+		},
+		{
+			name:     "plus quantifier",
+			input:    "test+",
+			expected: true,
+		},
+		{
+			name:     "question mark",
+			input:    "test?",
+			expected: true,
+		},
+		{
+			name:     "dot wildcard",
+			input:    "test.",
+			expected: false, // dots are no longer considered regex metacharacters
+		},
+		{
+			name:     "square brackets",
+			input:    "test[abc]",
+			expected: true,
+		},
+		{
+			name:     "parentheses grouping",
+			input:    "(test)",
+			expected: true,
+		},
+		{
+			name:     "curly braces quantifier",
+			input:    "test{1,3}",
+			expected: true,
+		},
+		{
+			name:     "pipe alternation",
+			input:    "test|other",
+			expected: true,
+		},
+		{
+			name:     "backslash escape",
+			input:    "test\\",
+			expected: true,
+		},
+		{
+			name:     "multiple metacharacters",
+			input:    "^test.*$",
+			expected: true,
+		},
+		{
+			name:     "complex regex pattern",
+			input:    "kernel-headers.*",
+			expected: true,
+		},
+		{
+			name:     "anchored regex",
+			input:    "^kernel-headers$",
+			expected: true,
+		},
+		{
+			name:     "character class",
+			input:    "test[0-9]",
+			expected: true,
+		},
+
+		// escaped character classes
+		{
+			name:     "escaped digit",
+			input:    "\\d",
+			expected: true,
+		},
+		{
+			name:     "escaped non-digit",
+			input:    "\\D",
+			expected: true,
+		},
+		{
+			name:     "escaped word character",
+			input:    "\\w",
+			expected: true,
+		},
+		{
+			name:     "escaped non-word character",
+			input:    "\\W",
+			expected: true,
+		},
+		{
+			name:     "escaped whitespace",
+			input:    "\\s",
+			expected: true,
+		},
+		{
+			name:     "escaped non-whitespace",
+			input:    "\\S",
+			expected: true,
+		},
+		{
+			name:     "escaped newline",
+			input:    "\\n",
+			expected: true,
+		},
+		{
+			name:     "escaped carriage return",
+			input:    "\\r",
+			expected: true,
+		},
+		{
+			name:     "escaped tab",
+			input:    "\\t",
+			expected: true,
+		},
+		{
+			name:     "escaped form feed",
+			input:    "\\f",
+			expected: true,
+		},
+		{
+			name:     "escaped vertical tab",
+			input:    "\\v",
+			expected: true,
+		},
+		{
+			name:     "escaped character classes in longer string",
+			input:    "prefix\\dpostfix",
+			expected: true,
+		},
+		{
+			name:     "multiple escaped classes",
+			input:    "\\w+\\s*\\d+",
+			expected: true,
+		},
+
+		// edge cases
+		{
+			name:     "single backslash",
+			input:    "\\",
+			expected: true,
+		},
+		{
+			name:     "single caret",
+			input:    "^",
+			expected: true,
+		},
+		{
+			name:     "single dollar",
+			input:    "$",
+			expected: true,
+		},
+		{
+			name:     "single dot",
+			input:    ".",
+			expected: false, // dots are no longer considered regex metacharacters
+		},
+		{
+			name:     "backslash followed by regular character",
+			input:    "\\a",
+			expected: true, // backslash is still a metacharacter
+		},
+		{
+			name:     "backslash at end",
+			input:    "test\\",
+			expected: true,
+		},
+		{
+			name:     "mixed metacharacters and escaped classes",
+			input:    "^\\w+\\.\\d{2,}$",
+			expected: true,
+		},
+		{
+			name:     "real world package patterns",
+			input:    "linux-.*",
+			expected: true,
+		},
+		{
+			name:     "real world upstream patterns",
+			input:    "linux.*",
+			expected: true,
+		},
+		{
+			name:     "real world header patterns",
+			input:    "linux-.*-headers-.*",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isLikelyARegex(tt.input)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestIgnoreRelatedPackage(t *testing.T) {
+	ownerPkgID := pkg.ID("apk-httpie-pkg")
+	unrelatedPkgID := pkg.ID("unrelated-pkg")
+
+	matchWithRelationship := Match{
+		Vulnerability: vulnerability.Vulnerability{
+			Reference: vulnerability.Reference{
+				ID:        "CVE-2019-10751",
+				Namespace: "github:language:python",
+			},
+			RelatedVulnerabilities: []vulnerability.Reference{
+				{ID: "GHSA-xjjg-vmw6-c2p9"},
+			},
+		},
+		Package: pkg.Package{
+			ID:   pkg.ID("python-httpie-pkg"),
+			Name: "httpie",
+			RelatedPackages: map[artifact.RelationshipType][]*pkg.Package{
+				artifact.OwnershipByFileOverlapRelationship: {
+					{ID: ownerPkgID, Name: "httpie"},
+				},
+			},
+		},
+	}
+
+	matchNoRelationship := Match{
+		Vulnerability: vulnerability.Vulnerability{
+			Reference: vulnerability.Reference{
+				ID:        "CVE-2019-10751",
+				Namespace: "github:language:python",
+			},
+			RelatedVulnerabilities: []vulnerability.Reference{
+				{ID: "GHSA-xjjg-vmw6-c2p9"},
+			},
+		},
+		Package: pkg.Package{
+			ID:   pkg.ID("python-httpie-pkg-2"),
+			Name: "httpie",
+			// no RelatedPackages
+		},
+	}
+
+	matchDifferentVuln := Match{
+		Vulnerability: vulnerability.Vulnerability{
+			Reference: vulnerability.Reference{
+				ID:        "CVE-OTHER",
+				Namespace: "github:language:python",
+			},
+		},
+		Package: pkg.Package{
+			ID:   pkg.ID("python-httpie-pkg-3"),
+			Name: "httpie",
+			RelatedPackages: map[artifact.RelationshipType][]*pkg.Package{
+				artifact.OwnershipByFileOverlapRelationship: {
+					{ID: ownerPkgID, Name: "httpie"},
+				},
+			},
+		},
+	}
+
+	matchDirectVulnID := Match{
+		Vulnerability: vulnerability.Vulnerability{
+			Reference: vulnerability.Reference{
+				ID:        "GHSA-xjjg-vmw6-c2p9",
+				Namespace: "wolfi:distro:wolfi:rolling",
+			},
+		},
+		Package: pkg.Package{
+			ID:   pkg.ID("python-httpie-direct"),
+			Name: "httpie",
+			RelatedPackages: map[artifact.RelationshipType][]*pkg.Package{
+				artifact.OwnershipByFileOverlapRelationship: {
+					{ID: ownerPkgID, Name: "httpie"},
+				},
+			},
+		},
+	}
+
+	filter := IgnoreRelatedPackage{
+		Reason:           ignorereasons.DistroNAK,
+		RelationshipType: artifact.OwnershipByFileOverlapRelationship,
+		VulnerabilityID:  "GHSA-xjjg-vmw6-c2p9",
+		RelatedPackageID: ownerPkgID,
+	}
+
+	tests := []struct {
+		name          string
+		match         Match
+		expectIgnored bool
+	}{
+		{
+			name:          "ignores match with related vuln and ownership relationship",
+			match:         matchWithRelationship,
+			expectIgnored: true,
+		},
+		{
+			name:          "ignores match with direct vuln ID and ownership relationship",
+			match:         matchDirectVulnID,
+			expectIgnored: true,
+		},
+		{
+			name:          "does not ignore match without relationship",
+			match:         matchNoRelationship,
+			expectIgnored: false,
+		},
+		{
+			name:          "does not ignore match with different vulnerability",
+			match:         matchDifferentVuln,
+			expectIgnored: false,
+		},
+		{
+			name: "does not ignore match with wrong related package ID",
+			match: Match{
+				Vulnerability: vulnerability.Vulnerability{
+					Reference: vulnerability.Reference{
+						ID: "GHSA-xjjg-vmw6-c2p9",
+					},
+				},
+				Package: pkg.Package{
+					ID:   pkg.ID("some-pkg"),
+					Name: "httpie",
+					RelatedPackages: map[artifact.RelationshipType][]*pkg.Package{
+						artifact.OwnershipByFileOverlapRelationship: {
+							{ID: unrelatedPkgID, Name: "something-else"},
+						},
+					},
+				},
+			},
+			expectIgnored: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := filter.IgnoreMatch(tt.match)
+			if tt.expectIgnored {
+				assert.NotEmpty(t, rules, "expected match to be ignored")
+				assert.Equal(t, filter.VulnerabilityID, rules[0].Vulnerability)
+				assert.Equal(t, filter.Reason, rules[0].Reason)
+				assert.True(t, rules[0].IncludeAliases, "emitted rule should include aliases")
+			} else {
+				assert.Empty(t, rules, "expected match to NOT be ignored")
+			}
+		})
+	}
+}
 
 func TestShouldIgnore(t *testing.T) {
 	cases := []struct {
@@ -815,7 +1358,7 @@ func TestShouldIgnore(t *testing.T) {
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			actual := shouldIgnore(testCase.match, testCase.rule)
+			actual := len(testCase.rule.IgnoreMatch(testCase.match)) > 0
 			assert.Equal(t, testCase.expected, actual)
 		})
 	}

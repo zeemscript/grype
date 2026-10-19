@@ -22,15 +22,15 @@ func TestSBOMInput_AsArgument(t *testing.T) {
 	}{
 		{
 			"absolute path - image scan",
-			path.Join(workingDirectory, "./test-fixtures/sbom-ubuntu-20.04--pruned.json"),
+			path.Join(workingDirectory, "./testdata/sbom-ubuntu-20.04--pruned.json"),
 		},
 		{
 			"relative path - image scan",
-			"./test-fixtures/sbom-ubuntu-20.04--pruned.json",
+			"./testdata/sbom-ubuntu-20.04--pruned.json",
 		},
 		{
 			"directory scan",
-			"./test-fixtures/sbom-grype-source.json",
+			"./testdata/sbom-grype-source.json",
 		},
 	}
 
@@ -67,14 +67,14 @@ func TestSBOMInput_FromStdin(t *testing.T) {
 	}{
 		{
 			name:       "empty file",
-			input:      "./test-fixtures/empty.json",
+			input:      "./testdata/empty.json",
 			args:       []string{"-c", "../grype-test-config.yaml"},
 			wantErr:    require.Error,
 			wantOutput: "unable to decode sbom: sbom format not recognized",
 		},
 		{
 			name:    "sbom",
-			input:   "./test-fixtures/sbom-ubuntu-20.04--pruned.json",
+			input:   "./testdata/sbom-ubuntu-20.04--pruned.json",
 			args:    []string{"-c", "../grype-test-config.yaml"},
 			wantErr: require.NoError,
 		},
@@ -82,7 +82,7 @@ func TestSBOMInput_FromStdin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := exec.Command(getGrypeSnapshotLocation(t, runtime.GOOS), tt.args...)
+			cmd := exec.Command(getGrypeSnapshotLocation(t, runtime.GOOS, runtime.GOARCH), tt.args...)
 
 			input, err := os.Open(tt.input)
 			require.NoError(t, err)

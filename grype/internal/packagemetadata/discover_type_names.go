@@ -5,21 +5,26 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/scylladb/go-set/strset"
+
+	"github.com/anchore/grype/internal/repoutil"
 )
 
 var metadataExceptions = strset.New(
 	"FileMetadata",
+	"SBOMFileMetadata",
+	"PURLLiteralMetadata",
+	"CPELiteralMetadata",
+	"ZarfPackageMetadata",
 )
 
 func DiscoverTypeNames() ([]string, error) {
-	root, err := RepoRoot()
+	root, err := repoutil.Root()
 	if err != nil {
 		return nil, err
 	}
@@ -28,18 +33,6 @@ func DiscoverTypeNames() ([]string, error) {
 		return nil, err
 	}
 	return findMetadataDefinitionNames(files...)
-}
-
-func RepoRoot() (string, error) {
-	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return "", fmt.Errorf("unable to find repo root dir: %+v", err)
-	}
-	absRepoRoot, err := filepath.Abs(strings.TrimSpace(string(root)))
-	if err != nil {
-		return "", fmt.Errorf("unable to get abs path to repo root: %w", err)
-	}
-	return absRepoRoot, nil
 }
 
 func findMetadataDefinitionNames(paths ...string) ([]string, error) {
@@ -70,7 +63,7 @@ func findMetadataDefinitionNames(paths ...string) ([]string, error) {
 	// note: 3 is a point-in-time gut check. This number could be updated if new metadata definitions are added, but is not required.
 	// it is really intended to catch any major issues with the generation process that would generate, say, 0 definitions.
 	if len(strNames) < 3 {
-		return nil, fmt.Errorf("not enough metadata definitions found (discovered: " + fmt.Sprintf("%d", len(strNames)) + ")")
+		return nil, fmt.Errorf("not enough metadata definitions found: discovered %d ", len(strNames))
 	}
 
 	return strNames, nil

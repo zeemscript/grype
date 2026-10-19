@@ -2,11 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/anchore/grype/internal/dbtest"
 	"github.com/anchore/stereoscope/pkg/imagetest"
 )
 
@@ -29,14 +30,16 @@ func getGrypeCommand(tb testing.TB, args ...string) *exec.Cmd {
 	tb.Helper()
 	argsWithConfig := args
 	if !grypeCommandHasConfigArg(argsWithConfig...) {
+		// note: this is an absolute path since the working directory may have been changed by
+		// building the snapshot binary
 		argsWithConfig = append(
-			[]string{"-c", "../grype-test-config.yaml"},
+			[]string{"-c", filepath.Join(repoRoot(tb), "test", "grype-test-config.yaml")},
 			args...,
 		)
 	}
 
 	return exec.Command(
-		getGrypeSnapshotLocation(tb, runtime.GOOS),
+		getGrypeSnapshotLocation(tb, runtime.GOOS, runtime.GOARCH),
 		argsWithConfig...,
 	)
 }
@@ -50,38 +53,113 @@ func grypeCommandHasConfigArg(args ...string) bool {
 	return false
 }
 
-func getGrypeSnapshotLocation(tb testing.TB, goOS string) string {
-	if os.Getenv("GRYPE_BINARY_LOCATION") != "" {
-		// GRYPE_BINARY_LOCATION is the absolute path to the snapshot binary
-		return os.Getenv("GRYPE_BINARY_LOCATION")
+func getGrypeSnapshotLocation(t testing.TB, goOS, goArch string) string {
+	loc := getGrypeBinaryLocationByOS(t, goOS, goArch)
+	// GRYPE_BINARY_LOCATION is the absolute path to the snapshot binary
+	const envKey = "GRYPE_BINARY_LOCATION"
+	if os.Getenv(envKey) != "" {
+		// we were run from a snapshot test, so we already have a snapshot binary
+		return loc
 	}
-
-	// note: for amd64 we need to update the snapshot location with the v1 suffix
-	// see : https://goreleaser.com/customization/build/#why-is-there-a-_v1-suffix-on-amd64-builds
-	archPath := runtime.GOARCH
-	if runtime.GOARCH == "amd64" {
-		archPath = fmt.Sprintf("%s_v1", archPath)
+	// if this was built locally
+	if os.Getenv(loc) != "" {
+		return loc
 	}
-
-	switch goOS {
-	case "darwin", "linux":
-		return path.Join(repoRoot(tb), fmt.Sprintf("snapshot/%s-build_%s_%s/grype", goOS, goOS, archPath))
-	default:
-		tb.Fatalf("unsupported OS: %s", runtime.GOOS)
-	}
-	return ""
+	buildBinary(t, loc, goOS, goArch)
+	_ = os.Setenv(loc, loc)
+	return loc
 }
 
-func getDockerRunCommand(tb testing.TB, args ...string) *exec.Cmd {
+// goreleaserArchSuffix is the microarchitecture level goreleaser appends to the build target
+// directory for each arch we build in .goreleaser.yaml. goreleaser always appends the level for
+// arches that have one -- even when it is the default -- and appends nothing for arches that don't
+// (s390x), e.g. linux-build_linux_amd64_v1 vs linux-build_linux_s390x. The values here are
+// goreleaser's defaults (GOAMD64, GOARM64, GOPPC64), since .goreleaser.yaml does not override them.
+// see: https://goreleaser.com/customization/build/#why-is-there-a-_v1-suffix-on-amd64-builds
+var goreleaserArchSuffix = map[string]string{
+	"amd64":   "_v1",
+	"arm64":   "_v8.0",
+	"ppc64le": "_power8",
+	"s390x":   "",
+}
+
+// getGrypeBinaryLocationByOS returns the goreleaser snapshot location for a given target: the
+// dist dir holds one directory per build target, named <build id>_<goos>_<goarch><microarch level>.
+// The build IDs in .goreleaser.yaml are <goos>-build, hence the subtle - vs _ difference below.
+func getGrypeBinaryLocationByOS(t testing.TB, goOS, goArch string) string {
+	executable := "grype"
+	switch goOS {
+	case "windows":
+		// windows-build: amd64
+		executable += ".exe"
+	case "darwin", "linux":
+		// darwin-build: amd64, arm64; linux-build: amd64, arm64, ppc64le, s390x
+	default:
+		t.Fatalf("unsupported OS: %s", goOS)
+		return ""
+	}
+
+	suffix, ok := goreleaserArchSuffix[goArch]
+	if !ok {
+		t.Fatalf("unsupported arch: %s (add its goreleaser microarchitecture level to goreleaserArchSuffix)", goArch)
+		return ""
+	}
+
+	return filepath.Join(repoRoot(t), "snapshot", fmt.Sprintf("%s-build_%s_%s%s", goOS, goOS, goArch, suffix), executable)
+}
+
+func buildBinary(t testing.TB, loc, goOS, goArch string) {
+	t.Logf("Building grype for %s %s...", goOS, goArch)
+	c := exec.Command("go", "build", "-o", loc, "./cmd/grype")
+	// note: set the build directory on the command instead of changing the working directory of the
+	// test process itself -- tests (and imagetest fixtures) resolve paths relative to ./test/cli
+	c.Dir = repoRoot(t)
+	environ := append(os.Environ(), "CGO_ENABLED=0")
+	if goOS != runtime.GOOS || goArch != runtime.GOARCH {
+		environ = append(environ, fmt.Sprintf("GOOS=%s", goOS), fmt.Sprintf("GOARCH=%s", goArch))
+	}
+	c.Env = environ
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	c.Stdin = os.Stdin
+	require.NoError(t, c.Run())
+}
+
+// getDockerRunCommandContext gets a command to run docker that allows interrupting the container,
+// which allows --rm to clean it up instead of leaving it running
+func getDockerRunCommandContext(ctx context.Context, tb testing.TB, args ...string) *exec.Cmd {
 	tb.Helper()
 
-	return exec.Command(
+	cmd := exec.CommandContext(
+		ctx,
 		"docker",
 		append(
 			[]string{"run"},
 			args...,
 		)...,
 	)
+	cmd.Cancel = func() error {
+		// docker forwards this to the container, which lets it (and --rm) shut down cleanly
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	cmd.WaitDelay = 10 * time.Second
+
+	return cmd
+}
+
+// seedTestDB installs a locally built vulnerability DB into a new directory and returns that
+// directory, so that tests can run grype without downloading the real DB.
+func seedTestDB(t *testing.T) string {
+	t.Helper()
+
+	dbDir := t.TempDir()
+	cmd, stdout, stderr := runGrype(t, map[string]string{
+		"GRYPE_DB_CACHE_DIR":  dbDir,
+		"GRYPE_DB_UPDATE_URL": dbtest.NewServer(t).Start(),
+	}, "db", "update", "-v")
+	assertSucceedingReturnCode(t, stdout, stderr, cmd.ProcessState.ExitCode())
+
+	return dbDir
 }
 
 func runGrype(tb testing.TB, env map[string]string, args ...string) (*exec.Cmd, string, string) {
@@ -152,19 +230,5 @@ func assertCommandExecutionSuccess(t testing.TB, cmd *exec.Cmd) {
 		}
 
 		t.Fatalf("unable to run command %q: %v", cmd, err)
-	}
-}
-
-func testWithTimeout(t *testing.T, name string, timeout time.Duration, test func(*testing.T)) {
-	done := make(chan bool)
-	go func() {
-		t.Run(name, test)
-		done <- true
-	}()
-
-	select {
-	case <-time.After(timeout):
-		t.Fatal("test timed out")
-	case <-done:
 	}
 }

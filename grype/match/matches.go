@@ -9,7 +9,7 @@ import (
 
 type Matches struct {
 	byFingerprint map[Fingerprint]Match
-	byPackage     map[pkg.ID][]Fingerprint
+	byPackage     map[pkg.ID]map[Fingerprint]struct{}
 }
 
 func NewMatches(matches ...Match) Matches {
@@ -21,13 +21,13 @@ func NewMatches(matches ...Match) Matches {
 func newMatches() Matches {
 	return Matches{
 		byFingerprint: make(map[Fingerprint]Match),
-		byPackage:     make(map[pkg.ID][]Fingerprint),
+		byPackage:     make(map[pkg.ID]map[Fingerprint]struct{}),
 	}
 }
 
 // GetByPkgID returns a slice of potential matches from an ID
 func (r *Matches) GetByPkgID(id pkg.ID) (matches []Match) {
-	for _, fingerprint := range r.byPackage[id] {
+	for fingerprint := range r.byPackage[id] {
 		matches = append(matches, r.byFingerprint[fingerprint])
 	}
 	return matches
@@ -37,7 +37,7 @@ func (r *Matches) GetByPkgID(id pkg.ID) (matches []Match) {
 func (r *Matches) AllByPkgID() map[pkg.ID][]Match {
 	matches := make(map[pkg.ID][]Match)
 	for id, fingerprints := range r.byPackage {
-		for _, fingerprint := range fingerprints {
+		for fingerprint := range fingerprints {
 			matches[id] = append(matches[id], r.byFingerprint[fingerprint])
 		}
 	}
@@ -46,7 +46,7 @@ func (r *Matches) AllByPkgID() map[pkg.ID][]Match {
 
 func (r *Matches) Merge(other Matches) {
 	for _, fingerprints := range other.byPackage {
-		for _, fingerprint := range fingerprints {
+		for fingerprint := range fingerprints {
 			r.Add(other.byFingerprint[fingerprint])
 		}
 	}
@@ -62,26 +62,34 @@ func (r *Matches) Diff(other Matches) *Matches {
 	return &diff
 }
 
+// Add stores the given matches, folding each into any match already present for the same finding.
+// A fingerprint is one vulnerability, from one source, on one package -- so records that describe
+// that finding differently, such as two vulnerable CPEs of one CVE that the package matches, or an
+// advisory found both directly and via the package's upstream, become a single match carrying all
+// of their details rather than duplicate findings. See Match.Merge for how they are reconciled.
 func (r *Matches) Add(matches ...Match) {
-	if len(matches) == 0 {
-		return
-	}
 	for _, newMatch := range matches {
 		fingerprint := newMatch.Fingerprint()
 
-		// add or merge the new match with an existing match
+		// normalize first: every detail set this collection holds is deduped and ordered strongest-first
+		newMatch.Details = mergeDetails(newMatch.Details)
+
 		if existingMatch, exists := r.byFingerprint[fingerprint]; exists {
 			if err := existingMatch.Merge(newMatch); err != nil {
-				log.Warnf("unable to merge matches: original=%q new=%q : %w", existingMatch.String(), newMatch.String(), err)
-				// TODO: dropped match in this case, we should figure a way to handle this
+				// unreachable: an equal fingerprint is the only thing Merge rejects on
+				log.WithFields("original", existingMatch.String(), "new", newMatch.String(), "error", err).Warn("unable to merge matches")
+				// at least capture the additional details
+				existingMatch.Details = mergeDetails(existingMatch.Details, newMatch.Details)
 			}
 			r.byFingerprint[fingerprint] = existingMatch
 		} else {
 			r.byFingerprint[fingerprint] = newMatch
 		}
 
-		// keep track of which matches correspond to which packages
-		r.byPackage[newMatch.Package.ID] = append(r.byPackage[newMatch.Package.ID], fingerprint)
+		if _, exists := r.byPackage[newMatch.Package.ID]; !exists {
+			r.byPackage[newMatch.Package.ID] = make(map[Fingerprint]struct{})
+		}
+		r.byPackage[newMatch.Package.ID][fingerprint] = struct{}{}
 	}
 }
 

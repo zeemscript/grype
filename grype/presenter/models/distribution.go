@@ -2,40 +2,32 @@ package models
 
 import (
 	"github.com/anchore/grype/grype/distro"
-	"github.com/anchore/grype/internal/log"
-	"github.com/anchore/syft/syft/linux"
+	"github.com/anchore/grype/grype/pkg"
 )
 
 // distribution provides information about a detected Linux distribution.
 type distribution struct {
-	Name    string   `json:"name"`    // Name of the Linux distribution
-	Version string   `json:"version"` // Version of the Linux distribution (major or major.minor version)
-	IDLike  []string `json:"idLike"`  // the ID_LIKE field found within the /etc/os-release file
+	Name     string   `json:"name"`               // Name of the Linux distribution
+	Version  string   `json:"version"`            // Version of the Linux distribution (major or major.minor version)
+	IDLike   []string `json:"idLike"`             // the ID_LIKE field found within the /etc/os-release file
+	Channels []string `json:"channels,omitempty"` // channels for the distribution, if available
 }
 
 // newDistribution creates a struct with the Linux distribution to be represented in JSON.
-func newDistribution(r *linux.Release) distribution {
-	if r == nil {
+func newDistribution(ctx pkg.Context, d *distro.Distro) distribution {
+	if ctx.Distro != nil {
+		// if the distro is provided in the context, use it
+		d = ctx.Distro
+	}
+	if d == nil {
 		return distribution{}
 	}
 
-	// attempt to use the strong distro type (like the matchers do)
-	d, err := distro.NewFromRelease(*r)
-	if err != nil {
-		log.Warnf("unable to determine linux distribution: %+v", err)
-
-		// as a fallback use the raw release information
-		return distribution{
-			Name:    r.ID,
-			Version: r.VersionID,
-			IDLike:  cleanIDLike(r.IDLike),
-		}
-	}
-
 	return distribution{
-		Name:    d.Name(),
-		Version: d.FullVersion(),
-		IDLike:  cleanIDLike(d.IDLike),
+		Name:     d.Name(),
+		Version:  d.Version,
+		IDLike:   cleanIDLike(d.IDLike),
+		Channels: d.Channels,
 	}
 }
 

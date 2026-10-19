@@ -3,69 +3,228 @@ package distro
 import (
 	"fmt"
 	"strings"
+	"time"
 
-	hashiVer "github.com/hashicorp/go-version"
-
+	"github.com/anchore/grype/grype/version"
+	"github.com/anchore/grype/internal/log"
+	"github.com/anchore/grype/internal/stringutil"
 	"github.com/anchore/syft/syft/linux"
 )
 
 // Distro represents a Linux Distribution.
 type Distro struct {
-	Type       Type
-	Version    *hashiVer.Version
-	RawVersion string
-	IDLike     []string
+	Type     Type
+	Version  string   // major.minor.patch
+	Codename string   // in lieu of a version e.g. "fossa" instead of "20.04"
+	Channels []string // distinguish between different feeds for fix and vulnerability data, e.g. "eus" for RHEL
+	IDLike   []string
+
+	// SupportEnd is the SUPPORT_END date declared by the OS release file, if present and parseable.
+	SupportEnd *time.Time
+
+	// fields populated in the constructor
+
+	major     string
+	minor     string
+	remaining string
 }
 
 // New creates a new Distro object populated with the given values.
-func New(t Type, version string, idLikes ...string) (*Distro, error) {
-	var verObj *hashiVer.Version
-	var err error
+func New(t Type, version, label string, idLikes ...string) *Distro {
+	major, minor, remaining, versionWithoutSuffix, channels := parseVersion(version)
 
-	if version != "" {
-		verObj, err = hashiVer.NewVersion(version)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse version: %w", err)
+	for i := range idLikes {
+		typ, ok := IDMapping[strings.TrimSpace(idLikes[i])]
+		if ok {
+			idLikes[i] = typ.String()
 		}
 	}
 
 	return &Distro{
-		Type:       t,
-		Version:    verObj,
-		RawVersion: version,
-		IDLike:     idLikes,
-	}, nil
+		Type:     t,
+		Version:  versionWithoutSuffix,
+		Codename: label,
+		IDLike:   idLikes,
+		Channels: channels,
+
+		major:     major,
+		minor:     minor,
+		remaining: remaining,
+	}
+}
+
+func parseVersion(version string) (major, minor, remaining, versionWithoutSuffix string, channels []string) {
+	if version == "" {
+		return "", "", "", "", nil
+	}
+
+	versionWithoutSuffix = version
+	var channelStr string
+	if strings.Contains(version, "+") {
+		vParts := strings.SplitN(version, "+", 2)
+		version = vParts[0]
+		versionWithoutSuffix = version
+		channelStr = vParts[1]
+	}
+
+	version = strings.TrimPrefix(version, "v")
+
+	// if starts with a digit, then assume it's a version and extract the major, minor, and remaining versions
+	if len(version) > 0 && version[0] >= '0' && version[0] <= '9' {
+		// extract the major, minor, and remaining versions
+		parts := strings.Split(version, ".")
+		if len(parts) > 0 {
+			major = parts[0]
+			if len(parts) > 1 {
+				minor = parts[1]
+			}
+			if len(parts) > 2 {
+				remaining = strings.Join(parts[2:], ".")
+			}
+		}
+	}
+
+	return major, minor, remaining, versionWithoutSuffix, stringutil.SplitOnAny(strings.TrimSpace(channelStr), ",", "+")
+}
+
+// ParseDistroString parses a user-provided distro string in the format "name<separator>version"
+// where separator can be "-", ":", or "@". It handles the special case of opensuse-leap
+// which contains a hyphen in its distro ID. Returns the distro name and version parts.
+func ParseDistroString(s string) (name, version string) {
+	if s == "" {
+		return "", ""
+	}
+
+	s = strings.TrimSpace(s)
+
+	// Special handling for opensuse-leap which has a hyphen in its ID
+	// Check if it starts with "opensuse-leap" and handle accordingly
+	const opensuseLeap = "opensuse-leap"
+	if strings.HasPrefix(strings.ToLower(s), opensuseLeap) {
+		// Check if there's a separator after "opensuse-leap"
+		remaining := s[len(opensuseLeap):]
+		if len(remaining) == 0 {
+			return opensuseLeap, ""
+		}
+		// If the next character is a separator, split there
+		if remaining[0] == '-' || remaining[0] == ':' || remaining[0] == '@' {
+			return opensuseLeap, strings.TrimSpace(remaining[1:])
+		}
+		// Otherwise, treat the whole thing as the name
+		return s, ""
+	}
+
+	// Find the first occurrence of any separator
+	separators := []string{"-", ":", "@"}
+	minIdx := len(s)
+	foundSep := ""
+
+	for _, sep := range separators {
+		if idx := strings.Index(s, sep); idx != -1 && idx < minIdx {
+			minIdx = idx
+			foundSep = sep
+		}
+	}
+
+	if foundSep == "" {
+		return s, ""
+	}
+
+	return strings.TrimSpace(s[:minIdx]), strings.TrimSpace(s[minIdx+len(foundSep):])
+}
+
+// NewFromNameVersion creates a new Distro object derived from the provided name and version
+func NewFromNameVersion(name, version string) *Distro {
+	// separate any channel suffix before the codename heuristic below. Without this a value like
+	// "jammy+esm" is swallowed whole into the codename, which matches no OS record and silently
+	// yields zero results.
+	base, channels, hasChannels := strings.Cut(version, "+")
+
+	var codename string
+
+	// if there are no digits in the version, it is likely a codename
+	if !strings.ContainsAny(base, "0123456789") {
+		codename = base
+		base = ""
+	}
+
+	if hasChannels {
+		// re-attach the suffix so that channel splitting stays in parseVersion alone. When the base
+		// was a codename this leaves a bare "+esm", which parseVersion handles as an empty version.
+		base += "+" + channels
+	}
+
+	typ := IDMapping[name]
+	if typ == "" {
+		typ = Type(name)
+	}
+
+	return New(typ, base, codename, string(typ))
+}
+
+// FromRelease attempts to get a distro from the linux release, only logging any errors
+func FromRelease(linuxRelease *linux.Release, channels []FixChannel) *Distro {
+	if linuxRelease == nil {
+		return nil
+	}
+	d, err := NewFromRelease(*linuxRelease, channels)
+	if err != nil {
+		log.WithFields("error", err).Warn("unable to create distro from linux distribution")
+	}
+	return d
 }
 
 // NewFromRelease creates a new Distro object derived from a syft linux.Release object.
-func NewFromRelease(release linux.Release) (*Distro, error) {
+func NewFromRelease(release linux.Release, channels []FixChannel) (*Distro, error) {
 	t := TypeFromRelease(release)
 	if t == "" {
 		return nil, fmt.Errorf("unable to determine distro type")
 	}
 
-	var selectedVersion string
+	var (
+		selectedVersion    string
+		selectedVersionObj *version.Version
+	)
 
-	for _, version := range []string{release.VersionID, release.Version} {
-		if version == "" {
+	for _, ver := range []string{release.VersionID, release.Version} {
+		if ver == "" {
 			continue
 		}
 
-		if _, err := hashiVer.NewVersion(version); err == nil {
-			selectedVersion = version
+		versionObj := version.New(ver, version.SemanticFormat)
+
+		if versionObj.Validate() == nil {
+			selectedVersion = ver
+			selectedVersionObj = versionObj
 			break
 		}
 	}
 
-	if t == Debian && release.VersionID == "" && release.Version == "" && strings.Contains(release.PrettyName, "sid") {
-		return &Distro{
-			Type:       t,
-			RawVersion: "unstable",
-			IDLike:     release.IDLike,
-		}, nil
+	if selectedVersion == "" {
+		selectedVersion = release.VersionID
 	}
 
-	return New(t, selectedVersion, release.IDLike...)
+	d := New(t, selectedVersion, release.VersionCodename, release.IDLike...)
+	d.Channels = applyChannels(release, selectedVersionObj, d.Channels, channels)
+	d.SupportEnd = parseSupportEnd(release.SupportEnd)
+
+	return d, nil
+}
+
+// parseSupportEnd parses the os-release SUPPORT_END value, which is specified as YYYY-MM-DD.
+func parseSupportEnd(value string) *time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	t, err := time.Parse(time.DateOnly, value)
+	if err != nil {
+		log.WithFields("value", value, "error", err).Debug("unable to parse SUPPORT_END date from OS release")
+		return nil
+	}
+
+	return &t
 }
 
 func (d Distro) Name() string {
@@ -74,36 +233,61 @@ func (d Distro) Name() string {
 
 // MajorVersion returns the major version value from the pseudo-semantically versioned distro version value.
 func (d Distro) MajorVersion() string {
-	if d.Version == nil {
-		return strings.Split(d.RawVersion, ".")[0]
-	}
-	return fmt.Sprintf("%d", d.Version.Segments()[0])
+	return d.major
 }
 
-// FullVersion returns the original user version value.
-func (d Distro) FullVersion() string {
-	return d.RawVersion
+// MinorVersion returns the minor version value from the pseudo-semantically versioned distro version value.
+func (d Distro) MinorVersion() string {
+	return d.minor
+}
+
+func (d Distro) RemainingVersion() string {
+	return d.remaining
 }
 
 // String returns a human-friendly representation of the Linux distribution.
 func (d Distro) String() string {
-	versionStr := "(version unknown)"
-	if d.RawVersion != "" {
-		versionStr = d.RawVersion
-	}
-	return fmt.Sprintf("%s %s", d.Type, versionStr)
+	return fmt.Sprintf("%s %s", d.ID(), d.VersionString())
 }
 
-func (d Distro) IsRolling() bool {
-	return d.Type == Wolfi || d.Type == Chainguard || d.Type == ArchLinux || d.Type == Gentoo
+func (d Distro) ID() string {
+	return typeToIDMapping[d.Type]
 }
 
-// Unsupported Linux distributions
-func (d Distro) Disabled() bool {
-	switch {
-	case d.Type == ArchLinux:
-		return true
-	default:
-		return false
+func (d Distro) VersionString() string {
+	versionStr := ""
+	if d.Version != "" {
+		versionStr = d.Version
+	} else if d.Codename != "" {
+		versionStr = d.Codename
 	}
+
+	channels := nonEmptyStrings(d.Channels...)
+
+	if len(channels) > 0 {
+		versionStr += "+" + strings.Join(channels, ",")
+	}
+
+	return versionStr
+}
+
+func (d Distro) LabelVersion() string {
+	if d.Codename != "" {
+		return d.Codename
+	}
+
+	if d.major == "" && d.minor == "" && d.remaining == "" {
+		return d.Version
+	}
+
+	return ""
+}
+
+func nonEmptyStrings(ss ...string) (res []string) {
+	for _, s := range ss {
+		if s != "" {
+			res = append(res, s)
+		}
+	}
+	return res
 }

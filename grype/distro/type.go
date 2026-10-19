@@ -23,13 +23,21 @@ const (
 	OpenSuseLeap Type = "opensuseleap"
 	SLES         Type = "sles"
 	Photon       Type = "photon"
+	Echo         Type = "echo"
 	Windows      Type = "windows"
 	Mariner      Type = "mariner"
+	Azure        Type = "azurelinux"
 	RockyLinux   Type = "rockylinux"
 	AlmaLinux    Type = "almalinux"
 	Gentoo       Type = "gentoo"
 	Wolfi        Type = "wolfi"
 	Chainguard   Type = "chainguard"
+	MinimOS      Type = "minimos"
+	Raspbian     Type = "raspbian"
+	Scientific   Type = "scientific"
+	SecureOS     Type = "secureos"
+	PostmarketOS Type = "postmarketos"
+	Hummingbird  Type = "hummingbird"
 )
 
 // All contains all Linux distribution options
@@ -47,16 +55,24 @@ var All = []Type{
 	OpenSuseLeap,
 	SLES,
 	Photon,
+	Echo,
 	Windows,
 	Mariner,
+	Azure,
 	RockyLinux,
 	AlmaLinux,
 	Gentoo,
 	Wolfi,
 	Chainguard,
+	MinimOS,
+	Raspbian,
+	Scientific,
+	SecureOS,
+	PostmarketOS,
+	Hummingbird,
 }
 
-// IDMapping connects a distro ID like "ubuntu" to a Distro type
+// IDMapping maps a distro ID from the /etc/os-release (e.g. like "ubuntu") to a Distro type.
 var IDMapping = map[string]Type{
 	"debian":        Debian,
 	"ubuntu":        Ubuntu,
@@ -71,19 +87,47 @@ var IDMapping = map[string]Type{
 	"opensuse-leap": OpenSuseLeap,
 	"sles":          SLES,
 	"photon":        Photon,
-	"windows":       Windows,
+	"echo":          Echo,
 	"mariner":       Mariner,
+	"azurelinux":    Azure,
 	"rocky":         RockyLinux,
 	"almalinux":     AlmaLinux,
 	"gentoo":        Gentoo,
 	"wolfi":         Wolfi,
 	"chainguard":    Chainguard,
+	"minimos":       MinimOS,
+	"raspbian":      Raspbian,
+	"scientific":    Scientific,
+	"secureos":      SecureOS,
+	"postmarketos":  PostmarketOS,
+	"hummingbird":   Hummingbird,
+}
+
+// aliasTypes maps common aliases to their corresponding Type.
+var aliasTypes = map[string]Type{
+	"Alpine Linux":     Alpine, // needed for CPE matching (see #2039)
+	"windows":          Windows,
+	"scientific linux": Scientific, // Scientific linux prior to v7 didn't have an os-release file and syft raises up "scientific linux" as the release id as parsed from /etc/redhat-release
+}
+
+var typeToIDMapping = map[Type]string{}
+
+func init() {
+	for id, t := range IDMapping {
+		if _, ok := typeToIDMapping[t]; ok {
+			panic("duplicate Type found for ID: " + id + " with Type: " + string(t))
+		}
+		typeToIDMapping[t] = id
+	}
 }
 
 func TypeFromRelease(release linux.Release) Type {
 	// first try the release ID
-	t, ok := IDMapping[release.ID]
-	if ok {
+	if t, ok := IDMapping[release.ID]; ok {
+		return t
+	}
+
+	if t, ok := aliasTypes[release.ID]; ok {
 		return t
 	}
 
@@ -92,11 +136,17 @@ func TypeFromRelease(release linux.Release) Type {
 		if t, ok := IDMapping[l]; ok {
 			return t
 		}
+		if t, ok := aliasTypes[l]; ok {
+			return t
+		}
 	}
 
-	// first try the release name as a fallback
-	t, ok = IDMapping[release.Name]
-	if ok {
+	// then try the release name as a fallback
+	if t, ok := IDMapping[release.Name]; ok {
+		return t
+	}
+
+	if t, ok := aliasTypes[release.Name]; ok {
 		return t
 	}
 

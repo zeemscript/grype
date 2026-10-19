@@ -2,11 +2,15 @@ package commands
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/hashicorp/go-multierror"
+	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 	"golang.org/x/exp/maps"
 
@@ -21,13 +25,13 @@ func disableUI(app clio.Application) func(*cobra.Command, []string) error {
 		}
 
 		state := app.(Stater).State()
-		state.UIs = []clio.UI{ui.None(state.Config.Log.Quiet)}
+		state.UI = clio.NewUICollection(ui.None(state.Config.Log.Quiet))
 
 		return nil
 	}
 }
 
-func stderrPrintLnf(message string, args ...interface{}) error {
+func stderrPrintLnf(message string, args ...any) error {
 	if !strings.HasSuffix(message, "\n") {
 		message += "\n"
 	}
@@ -82,4 +86,39 @@ func appendErrors(errs error, err ...error) error {
 		}
 	}
 	return multierror.Append(errs, err...)
+}
+
+func newTable(output io.Writer, columns []string) *tablewriter.Table {
+	return tablewriter.NewTable(output,
+		tablewriter.WithHeader(columns),
+		tablewriter.WithHeaderAlignment(tw.AlignLeft),
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+		tablewriter.WithAutoHide(tw.On),
+		tablewriter.WithRenderer(renderer.NewBlueprint()),
+		tablewriter.WithBehavior(
+			tw.Behavior{
+				TrimSpace: tw.On,
+				AutoHide:  tw.On,
+			},
+		),
+		tablewriter.WithPadding(
+			tw.Padding{
+				Right: "  ",
+			},
+		),
+		tablewriter.WithRendition(
+			tw.Rendition{
+				Symbols: tw.NewSymbols(tw.StyleNone),
+				Settings: tw.Settings{
+					Lines: tw.Lines{
+						ShowTop:        tw.Off,
+						ShowBottom:     tw.Off,
+						ShowHeaderLine: tw.Off,
+						ShowFooterLine: tw.Off,
+					},
+				},
+			},
+		),
+	)
 }

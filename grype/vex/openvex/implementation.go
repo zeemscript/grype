@@ -3,7 +3,8 @@ package openvex
 import (
 	"errors"
 	"fmt"
-	"net/url"
+	"path"
+	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
+	vexStatus "github.com/anchore/grype/grype/vex/status"
 	"github.com/anchore/packageurl-go"
 	"github.com/anchore/syft/syft/source"
 )
@@ -26,27 +28,23 @@ type Match struct {
 	Statement openvex.Statement
 }
 
-// SearchedBy captures the prameters used to search through the VEX data
+// SearchedBy captures the parameters used to search through the VEX data
 type SearchedBy struct {
 	Vulnerability string
 	Product       string
 	Subcomponents []string
 }
 
-// augmentStatuses are the VEX statuses that augment results
-var augmentStatuses = []openvex.Status{
-	openvex.StatusAffected,
-	openvex.StatusUnderInvestigation,
-}
-
-// filterStatuses are the VEX statuses that filter matched to the ignore list
-var ignoreStatuses = []openvex.Status{
-	openvex.StatusNotAffected,
-	openvex.StatusFixed,
+// IsOpenVex checks if the provided document is a VEX document
+func IsOpenVex(document string) bool {
+	if _, err := openvex.Load(document); err == nil {
+		return true
+	}
+	return false
 }
 
 // ReadVexDocuments reads and merges VEX documents
-func (ovm *Processor) ReadVexDocuments(docs []string) (interface{}, error) {
+func (ovm *Processor) ReadVexDocuments(docs []string) (any, error) {
 	// Combine all VEX documents into a single VEX document
 	vexdata, err := openvex.MergeFiles(docs)
 	if err != nil {
@@ -58,17 +56,144 @@ func (ovm *Processor) ReadVexDocuments(docs []string) (interface{}, error) {
 
 // productIdentifiersFromContext reads the package context and returns software
 // identifiers identifying the scanned image.
-func productIdentifiersFromContext(pkgContext *pkg.Context) ([]string, error) {
+func productIdentifiersFromContext(pkgContext *pkg.Context) []string {
 	switch v := pkgContext.Source.Metadata.(type) {
 	case source.ImageMetadata:
-		// TODO(puerco): We can create a wider definition here. This effectively
-		// adds the multiarch image and the image of the OS running grype. We
-		// could generate more identifiers to match better.
-		return identifiersFromDigests(v.RepoDigests), nil
+		tagIdentifiers := identifiersFromTags(v.Tags, pkgContext.Source.Name)
+		digestIdentifiers := identifiersFromDigests(v.RepoDigests)
+		identifiers := slices.Concat(tagIdentifiers, digestIdentifiers)
+		return identifiers
 	default:
-		// Fail for now
-		return nil, errors.New("source type not supported for VEX")
+		if pkgContext.Source.Name != "" && pkgContext.Source.Version != "" {
+			return []string{"pkg:generic/" + strings.ToLower(pkgContext.Source.Name) + "@" + pkgContext.Source.Version}
+		}
+		// return an empty list so matching can be attempted using the
+		// package's own identifiers as the product
+		return []string{}
 	}
+}
+
+const canonicalDockerHubRegistry = "index.docker.io"
+
+func canonicalDockerHubHost(host string) string {
+	switch strings.ToLower(host) {
+	case "docker.io", canonicalDockerHubRegistry, "registry-1.docker.io":
+		return canonicalDockerHubRegistry
+	default:
+		return host
+	}
+}
+
+// tagSuffix extracts the tag component from a tag-qualified image reference
+// (e.g. "10.2" from "registry.access.redhat.com/ubi10/podman:10.2"). A digest
+// is not a tag, though a reference may carry both.
+func tagSuffix(ref string) (tag string, ok bool) {
+	if at := strings.Index(ref, "@"); at != -1 {
+		ref = ref[:at]
+	}
+
+	idx := strings.LastIndex(ref, ":")
+	if idx == -1 {
+		return "", false
+	}
+
+	// a colon in a path segment belongs to a registry host:port, not to a tag
+	tag = ref[idx+1:]
+	if tag == "" || strings.Contains(tag, "/") {
+		return "", false
+	}
+
+	return tag, true
+}
+
+// ociRepositoryIdentity returns the oci purl name (the last path segment of
+// repo) and every repository_url qualifier value that names repo. go-vex
+// compares qualifiers byte-for-byte and only requires the ones the document
+// names, so a spelling we omit can lose a match while an extra one costs
+// nothing; docker hub in particular is spelled both docker.io (as in the
+// purl-spec oci examples) and index.docker.io.
+func ociRepositoryIdentity(repo name.Repository) (baseName string, repoURLs []string) {
+	// RepositoryStr already supplies the implicit "library/" namespace for
+	// docker hub, and RegistryStr already resolves an empty or "docker.io"
+	// registry to index.docker.io.
+	repoPath := repo.RepositoryStr()
+	baseName = path.Base(repoPath)
+
+	host := canonicalDockerHubHost(repo.RegistryStr())
+	if host != canonicalDockerHubRegistry {
+		return baseName, []string{host + "/" + repoPath}
+	}
+
+	// go-containerregistry only supplies the implicit namespace when the
+	// registry is spelled index.docker.io, so apply it for the other spellings
+	// of docker hub as well.
+	shortPath := repoPath
+	if !strings.Contains(repoPath, "/") {
+		repoPath = "library/" + repoPath
+	} else {
+		shortPath = strings.TrimPrefix(repoPath, "library/")
+	}
+
+	repoURLs = []string{
+		canonicalDockerHubRegistry + "/" + repoPath,
+		"docker.io/" + repoPath,
+	}
+	if shortPath != repoPath {
+		repoURLs = append(repoURLs, "docker.io/"+shortPath)
+	}
+
+	return baseName, repoURLs
+}
+
+// repositoryQualifierSets returns one qualifier set per way the product can be
+// spelled: first without a repository_url at all, then one per known spelling.
+func repositoryQualifierSets(repoURLs []string) []map[string]string {
+	sets := []map[string]string{{}}
+	for _, u := range repoURLs {
+		sets = append(sets, map[string]string{"repository_url": u})
+	}
+	return sets
+}
+
+// repositoryOf resolves the repository named by an image reference, falling
+// back to the source name for references that don't parse.
+func repositoryOf(ref, fallback string) (name.Repository, error) {
+	if parsed, err := name.ParseReference(ref); err == nil {
+		return parsed.Context(), nil
+	}
+	return name.NewRepository(fallback)
+}
+
+func identifiersFromTags(tags []string, repoName string) []string {
+	identifiers := []string{}
+
+	for _, tag := range tags {
+		identifiers = append(identifiers, tag)
+
+		tagValue, ok := tagSuffix(tag)
+		if !ok {
+			continue
+		}
+
+		// a tag is itself a full image reference, and the daemon's tag list can
+		// span registries for a single local image, so the identity comes from
+		// the tag rather than from the source name.
+		baseName := path.Base(strings.TrimSuffix(tag, ":"+tagValue))
+		var repoURLs []string
+
+		if repo, err := repositoryOf(tag, repoName); err == nil {
+			baseName, repoURLs = ociRepositoryIdentity(repo)
+		}
+
+		for _, qMap := range repositoryQualifierSets(repoURLs) {
+			qMap["tag"] = tagValue
+			identifiers = append(identifiers, packageurl.NewPackageURL(
+				"oci", "", baseName, "", packageurl.QualifiersFromMap(qMap), "",
+			).String())
+		}
+	}
+
+	return identifiers
 }
 
 func identifiersFromDigests(digests []string) []string {
@@ -84,7 +209,6 @@ func identifiersFromDigests(digests []string) []string {
 			continue
 		}
 
-		var digestString, repoURL string
 		shaString := ref.Identifier()
 
 		// If not a digest, we can't form a purl, so skip it
@@ -92,24 +216,16 @@ func identifiersFromDigests(digests []string) []string {
 			continue
 		}
 
-		digestString = url.QueryEscape(shaString)
+		// repository_url is the full registry+repository path, including the
+		// trailing image name, matching the purl-spec oci examples (e.g.
+		// repository_url=docker.io/library/debian).
+		imgName, repoURLs := ociRepositoryIdentity(ref.Context())
 
-		pts := strings.Split(ref.Context().RepositoryStr(), "/")
-		name := pts[len(pts)-1]
-		repoURL = strings.TrimSuffix(
-			ref.Context().RegistryStr()+"/"+ref.Context().RepositoryStr(),
-			fmt.Sprintf("/%s", name),
-		)
-
-		qMap := map[string]string{}
-
-		if repoURL != "" {
-			qMap["repository_url"] = repoURL
+		for _, qMap := range repositoryQualifierSets(repoURLs) {
+			identifiers = append(identifiers, packageurl.NewPackageURL(
+				"oci", "", imgName, shaString, packageurl.QualifiersFromMap(qMap), "",
+			).String())
 		}
-		qs := packageurl.QualifiersFromMap(qMap)
-		identifiers = append(identifiers, packageurl.NewPackageURL(
-			"oci", "", name, digestString, qs, "",
-		).String())
 
 		// Add a hash to the identifier list in case people want to vex
 		// using the value of the image digest
@@ -135,10 +251,31 @@ func subcomponentIdentifiersFromMatch(m *match.Match) []string {
 	return ret
 }
 
+// findMatchingStatement searches a VEX document for a statement matching the
+// given vulnerability. It performs a two-pass search:
+//  1. Try SBOM/context product identifiers (handles image-as-product cases)
+//  2. Try the match's own package identifiers as the product (handles
+//     package-as-product cases, where the VEX product is a package PURL)
+func findMatchingStatement(doc *openvex.VEX, vulnID string, products []string, subcmp []string) (stmt *openvex.Statement, product string, subcomponents []string) {
+	for _, product := range products {
+		if stmts := doc.Matches(vulnID, product, subcmp); len(stmts) != 0 {
+			return &stmts[0], product, subcmp
+		}
+	}
+
+	for _, pkgID := range subcmp {
+		if stmts := doc.Matches(vulnID, pkgID, nil); len(stmts) != 0 {
+			return &stmts[0], pkgID, nil
+		}
+	}
+
+	return nil, "", nil
+}
+
 // FilterMatches takes a set of scanning results and moves any results marked in
 // the VEX data as fixed or not_affected to the ignored list.
 func (ovm *Processor) FilterMatches(
-	docRaw interface{}, ignoreRules []match.IgnoreRule, pkgContext *pkg.Context, matches *match.Matches, ignoredMatches []match.IgnoredMatch,
+	docRaw any, ignoreRules []match.IgnoreRule, pkgContext *pkg.Context, matches *match.Matches, ignoredMatches []match.IgnoredMatch,
 ) (*match.Matches, []match.IgnoredMatch, error) {
 	doc, ok := docRaw.(*openvex.VEX)
 	if !ok {
@@ -147,10 +284,7 @@ func (ovm *Processor) FilterMatches(
 
 	remainingMatches := match.NewMatches()
 
-	products, err := productIdentifiersFromContext(pkgContext)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading product identifiers from context: %w", err)
-	}
+	products := productIdentifiersFromContext(pkgContext)
 
 	// TODO(alex): should we apply the vex ignore rules to the already ignored matches?
 	// that way the end user sees all of the reasons a match was ignored in case multiple apply
@@ -158,16 +292,8 @@ func (ovm *Processor) FilterMatches(
 	// Now, let's go through grype's matches
 	sorted := matches.Sorted()
 	for i := range sorted {
-		var statement *openvex.Statement
 		subcmp := subcomponentIdentifiersFromMatch(&sorted[i])
-
-		// Range through the product's different names
-		for _, product := range products {
-			if matchingStatements := doc.Matches(sorted[i].Vulnerability.ID, product, subcmp); len(matchingStatements) != 0 {
-				statement = &matchingStatements[0]
-				break
-			}
-		}
+		statement, _, _ := findMatchingStatement(doc, sorted[i].Vulnerability.ID, products, subcmp)
 
 		// No data about this match's component. Next.
 		if statement == nil {
@@ -175,7 +301,7 @@ func (ovm *Processor) FilterMatches(
 			continue
 		}
 
-		rule := matchingRule(ignoreRules, sorted[i], statement, ignoreStatuses)
+		rule := matchingRule(ignoreRules, sorted[i], statement, vexStatus.IgnoreList())
 		if rule == nil {
 			remainingMatches.Add(sorted[i])
 			continue
@@ -197,13 +323,20 @@ func (ovm *Processor) FilterMatches(
 
 // matchingRule cycles through a set of ignore rules and returns the first
 // one that matches the statement and the match. Returns nil if none match.
-func matchingRule(ignoreRules []match.IgnoreRule, m match.Match, statement *openvex.Statement, allowedStatuses []openvex.Status) *match.IgnoreRule {
+func matchingRule(ignoreRules []match.IgnoreRule, m match.Match, statement *openvex.Statement, allowedStatuses []vexStatus.Status) *match.IgnoreRule {
 	ms := match.NewMatches()
 	ms.Add(m)
 
-	revStatuses := map[string]struct{}{}
-	for _, s := range allowedStatuses {
-		revStatuses[string(s)] = struct{}{}
+	// By default, if there are no ignore rules (which means the user didn't provide
+	// any custom VEX rule), a matching rule should be returned if the statement
+	// status is one of the allowed statuses.
+	if len(ignoreRules) == 0 && slices.Contains(allowedStatuses, vexStatus.Status(statement.Status)) {
+		return &match.IgnoreRule{
+			Namespace:        "vex",
+			Vulnerability:    statement.Vulnerability.ID,
+			VexJustification: string(statement.Justification),
+			VexStatus:        string(statement.Status),
+		}
 	}
 
 	for _, rule := range ignoreRules {
@@ -224,10 +357,8 @@ func matchingRule(ignoreRules []match.IgnoreRule, m match.Match, statement *open
 		}
 
 		// If the rule has a statement other than the allowed ones, skip:
-		if len(revStatuses) > 0 && rule.VexStatus != "" {
-			if _, ok := revStatuses[rule.VexStatus]; !ok {
-				continue
-			}
+		if rule.VexStatus != "" && !slices.Contains(allowedStatuses, vexStatus.Status(rule.VexStatus)) {
+			continue
 		}
 
 		// If the rule applies to a VEX justification it needs to match the
@@ -256,7 +387,7 @@ func matchingRule(ignoreRules []match.IgnoreRule, m match.Match, statement *open
 // about an affected VEX product is found on loaded VEX documents. Matches
 // are moved from the ignore list or synthesized when no previous data is found.
 func (ovm *Processor) AugmentMatches(
-	docRaw interface{}, ignoreRules []match.IgnoreRule, pkgContext *pkg.Context, remainingMatches *match.Matches, ignoredMatches []match.IgnoredMatch,
+	docRaw any, ignoreRules []match.IgnoreRule, pkgContext *pkg.Context, remainingMatches *match.Matches, ignoredMatches []match.IgnoredMatch,
 ) (*match.Matches, []match.IgnoredMatch, error) {
 	doc, ok := docRaw.(*openvex.VEX)
 	if !ok {
@@ -265,43 +396,22 @@ func (ovm *Processor) AugmentMatches(
 
 	additionalIgnoredMatches := []match.IgnoredMatch{}
 
-	products, err := productIdentifiersFromContext(pkgContext)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading product identifiers from context: %w", err)
-	}
+	products := productIdentifiersFromContext(pkgContext)
 
 	// Now, let's go through grype's matches
 	for i := range ignoredMatches {
-		var statement *openvex.Statement
-		var searchedBy *SearchedBy
 		subcmp := subcomponentIdentifiersFromMatch(&ignoredMatches[i].Match)
 
-		// Range through the product's different names to see if they match the
-		// statement data
-		for _, product := range products {
-			if matchingStatements := doc.Matches(ignoredMatches[i].Vulnerability.ID, product, subcmp); len(matchingStatements) != 0 {
-				if matchingStatements[0].Status != openvex.StatusAffected &&
-					matchingStatements[0].Status != openvex.StatusUnderInvestigation {
-					break
-				}
-				statement = &matchingStatements[0]
-				searchedBy = &SearchedBy{
-					Vulnerability: ignoredMatches[i].Vulnerability.ID,
-					Product:       product,
-					Subcomponents: subcmp,
-				}
-				break
-			}
-		}
+		statement, matchedProduct, matchedSubcmp := findMatchingStatement(doc, ignoredMatches[i].Vulnerability.ID, products, subcmp)
 
-		// No data about this match's component. Next.
-		if statement == nil {
+		// Only augment for affected or under_investigation statuses
+		if statement == nil || (statement.Status != openvex.StatusAffected && statement.Status != openvex.StatusUnderInvestigation) {
 			additionalIgnoredMatches = append(additionalIgnoredMatches, ignoredMatches[i])
 			continue
 		}
 
 		// Only match if rules to augment are configured
-		rule := matchingRule(ignoreRules, ignoredMatches[i].Match, statement, augmentStatuses)
+		rule := matchingRule(ignoreRules, ignoredMatches[i].Match, statement, vexStatus.AugmentList())
 		if rule == nil {
 			additionalIgnoredMatches = append(additionalIgnoredMatches, ignoredMatches[i])
 			continue
@@ -309,8 +419,12 @@ func (ovm *Processor) AugmentMatches(
 
 		newMatch := ignoredMatches[i].Match
 		newMatch.Details = append(newMatch.Details, match.Detail{
-			Type:       match.ExactDirectMatch,
-			SearchedBy: searchedBy,
+			Type: match.ExactDirectMatch,
+			SearchedBy: &SearchedBy{
+				Vulnerability: ignoredMatches[i].Vulnerability.ID,
+				Product:       matchedProduct,
+				Subcomponents: matchedSubcmp,
+			},
 			Found: Match{
 				Statement: *statement,
 			},

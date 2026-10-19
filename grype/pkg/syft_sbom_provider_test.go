@@ -1,29 +1,33 @@
 package pkg
 
 import (
-	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/go-test/deep"
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/anchore/grype/grype/distro"
 	"github.com/anchore/syft/syft/cpe"
 	"github.com/anchore/syft/syft/file"
-	"github.com/anchore/syft/syft/linux"
+	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/source"
 )
 
 func TestParseSyftJSON(t *testing.T) {
+	applyChannel := getDistroChannelApplier(testFixChannels())
+
 	tests := []struct {
 		Fixture  string
-		Packages []Package
+		Packages []*Package
 		Context  Context
 	}{
 		{
-			Fixture: "test-fixtures/syft-multiple-ecosystems.json",
-			Packages: []Package{
+			Fixture: "testdata/syft-multiple-ecosystems.json",
+			Packages: []*Package{
 				{
 					Name:    "alpine-baselayout",
 					Version: "3.2.0-r6",
@@ -48,6 +52,7 @@ func TestParseSyftJSON(t *testing.T) {
 						},
 					},
 					Metadata: ApkMetadata{
+						Arch: "x86_64",
 						Files: []ApkFileRecord{
 							{Path: "/dev"},
 							{Path: "/dev/pts"},
@@ -221,8 +226,8 @@ func TestParseSyftJSON(t *testing.T) {
 						},
 					},
 				},
-				Distro: &linux.Release{
-					Name:    "alpine",
+				Distro: &distro.Distro{
+					Type:    "alpine",
 					Version: "3.12.0",
 				},
 			},
@@ -232,7 +237,7 @@ func TestParseSyftJSON(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.Fixture, func(t *testing.T) {
-			pkgs, context, _, err := syftSBOMProvider(test.Fixture, ProviderConfig{})
+			pkgs, context, _, err := syftSBOMProvider(test.Fixture, ProviderConfig{}, applyChannel)
 			if err != nil {
 				t.Fatalf("unable to parse: %+v", err)
 			}
@@ -265,7 +270,8 @@ func TestParseSyftJSON(t *testing.T) {
 }
 
 func TestParseSyftJSON_BadCPEs(t *testing.T) {
-	pkgs, _, _, err := syftSBOMProvider("test-fixtures/syft-java-bad-cpes.json", ProviderConfig{})
+	applyChannel := getDistroChannelApplier(testFixChannels())
+	pkgs, _, _, err := syftSBOMProvider("testdata/syft-java-bad-cpes.json", ProviderConfig{}, applyChannel)
 	assert.NoError(t, err)
 	assert.Len(t, pkgs, 1)
 }
@@ -274,11 +280,11 @@ func TestParseSyftJSON_BadCPEs(t *testing.T) {
 // and package IDs are removed so that the test case variable isn't unwieldingly huge.
 var springImageTestCase = struct {
 	Fixture  string
-	Packages []Package
+	Packages []*Package
 	Context  Context
 }{
-	Fixture: "test-fixtures/syft-spring.json",
-	Packages: []Package{
+	Fixture: "testdata/syft-spring.json",
+	Packages: []*Package{
 		{
 			Name:    "charsets",
 			Version: "",
@@ -339,24 +345,260 @@ var springImageTestCase = struct {
 				RepoDigests: []string{"springio/gs-spring-boot-docker@sha256:39c2ffc784f5f34862e22c1f2ccdbcb62430736114c13f60111eabdb79decb08"},
 			},
 		},
-		Distro: &linux.Release{
-			Name:    "debian",
+		Distro: &distro.Distro{
+			Type:    "debian",
 			Version: "9",
 		},
 	},
 }
 
-func TestGetSBOMReader_EmptySBOM(t *testing.T) {
-	sbomFile, err := os.CreateTemp("", "empty.sbom")
-	require.NoError(t, err)
-	defer func() {
-		err := sbomFile.Close()
-		assert.NoError(t, err)
-	}()
+func Test_PurlList(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      ProviderConfig
+		userInput   string
+		wantContext Context
+		wantPkgs    []Package
+		wantErr     require.ErrorAssertionFunc
+	}{
+		{
+			name:      "takes multiple purls",
+			userInput: "purl:testdata/purl/valid-purl.txt",
+			wantContext: Context{
+				Distro: &distro.Distro{
+					Type:    "debian",
+					IDLike:  []string{"debian"},
+					Version: "8",
+				},
+				Source: &source.Description{
+					Metadata: SBOMFileMetadata{
+						Path: "testdata/purl/valid-purl.txt",
+					},
+				},
+			},
+			wantPkgs: []Package{
+				{
+					Name:    "ant",
+					Version: "1.10.8",
+					Type:    pkg.JavaPkg,
+					PURL:    "pkg:maven/org.apache.ant/ant@1.10.8",
+					Distro:  &distro.Distro{Type: distro.Debian, Version: "8", IDLike: []string{"debian"}},
+					Metadata: JavaMetadata{
+						PomArtifactID: "ant",
+						PomGroupID:    "org.apache.ant",
+					},
+				},
+				{
+					Name:    "log4j-core",
+					Version: "2.14.1",
+					Type:    pkg.JavaPkg,
+					PURL:    "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+					Distro:  &distro.Distro{Type: distro.Debian, Version: "8", IDLike: []string{"debian"}},
+					Metadata: JavaMetadata{
+						PomArtifactID: "log4j-core",
+						PomGroupID:    "org.apache.logging.log4j",
+					},
+				},
+				{
+					Name:    "sysv-rc",
+					Version: "2.88dsf-59",
+					Type:    pkg.DebPkg,
+					PURL:    "pkg:deb/debian/sysv-rc@2.88dsf-59?arch=all&distro=debian-8&upstream=sysvinit",
+					Distro:  &distro.Distro{Type: distro.Debian, Version: "8", IDLike: []string{"debian"}},
+					Upstreams: []UpstreamPackage{
+						{
+							Name: "sysvinit",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "infer context when distro is present for multiple similar purls",
+			userInput: "purl:testdata/purl/homogeneous-os.txt",
+			wantContext: Context{
+				Distro: &distro.Distro{
+					Type:    "alpine",
+					IDLike:  []string{"alpine"},
+					Version: "3.20.3",
+				},
+				Source: &source.Description{
+					Metadata: SBOMFileMetadata{
+						Path: "testdata/purl/homogeneous-os.txt",
+					},
+				},
+			},
+			wantPkgs: []Package{
+				{
+					Name:     "openssl",
+					Version:  "3.2.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/openssl@3.2.1?arch=aarch64&distro=alpine-3.20.3",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
+				},
+				{
+					Name:     "curl",
+					Version:  "7.61.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/curl@7.61.1?arch=aarch64&distro=alpine-3.20.3",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
+				},
+			},
+		},
+		{
+			name:      "different distro info in purls does not infer context",
+			userInput: "purl:testdata/purl/different-os.txt",
+			wantContext: Context{
+				// important: no distro info inferred
+				Source: &source.Description{
+					Metadata: SBOMFileMetadata{
+						Path: "testdata/purl/different-os.txt",
+					},
+				},
+			},
+			wantPkgs: []Package{
+				{
+					Name:     "openssl",
+					Version:  "3.2.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/openssl@3.2.1?arch=aarch64&distro=alpine-3.20.3",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
+				},
+				{
+					Name:     "curl",
+					Version:  "7.61.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/curl@7.61.1?arch=aarch64&distro=alpine-3.20.2",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.2", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
+				},
+			},
+		},
+		{
+			name:      "fails on path with nonexistent file",
+			userInput: "purl:tttt/empty.txt",
+			wantErr:   require.Error,
+		},
+		{
+			name:      "fails on invalid path",
+			userInput: "purl:~&&",
+			wantErr:   require.Error,
+		},
+		{
+			name:      "fails for empty purl file",
+			userInput: "purl:testdata/purl/empty.json",
+			wantErr:   require.Error,
+		},
+		{
+			name:      "fails on invalid purl in file",
+			userInput: "purl:testdata/purl/invalid-purl.txt",
+			wantErr:   require.Error,
+		},
+		{
+			name: "honors default channel configuration (no EUS)",
+			config: ProviderConfig{
+				SynthesisConfig: SynthesisConfig{
+					Distro: DistroConfig{
+						FixChannels: testFixChannels(),
+					},
+				},
+			},
+			userInput: "purl:testdata/purl/valid-rhel-9.txt",
+			wantContext: Context{
+				Source: &source.Description{
+					Metadata: SBOMFileMetadata{
+						Path: "testdata/purl/valid-rhel-9.txt",
+					},
+				},
+				Distro: &distro.Distro{
+					Type:    distro.RedHat,
+					IDLike:  []string{"redhat"},
+					Version: "9.4",
+				},
+			},
+			wantPkgs: []Package{
+				{
+					Name:    "kernel",
+					Version: "0:5.14.0-100",
+					Type:    pkg.RpmPkg,
+					Distro:  &distro.Distro{Type: distro.RedHat, Version: "9.4", IDLike: []string{"redhat"}},
+					PURL:    "pkg:rpm/redhat/kernel@0:5.14.0-100?distro=rhel-9.4",
+				},
+			},
+		},
+		{
+			name: "honors default channel configuration (EUS)",
+			config: ProviderConfig{
+				SynthesisConfig: SynthesisConfig{
+					Distro: DistroConfig{
+						FixChannels: testFixChannels(),
+					},
+				},
+			},
+			userInput: "purl:testdata/purl/valid-rhel-9+eus.txt",
+			wantContext: Context{
+				Source: &source.Description{
+					Metadata: SBOMFileMetadata{
+						Path: "testdata/purl/valid-rhel-9+eus.txt",
+					},
+				},
+				Distro: &distro.Distro{
+					Type:     distro.RedHat,
+					IDLike:   []string{"redhat"},
+					Channels: names("eus"), // important!
+					Version:  "9.4",
+				},
+			},
+			wantPkgs: []Package{
+				{
+					Name:    "kernel",
+					Version: "0:5.14.0-100",
+					Type:    pkg.RpmPkg,
+					Distro:  &distro.Distro{Type: distro.RedHat, Version: "9.4", Channels: names("eus"), IDLike: []string{"redhat"}},
+					PURL:    "pkg:rpm/redhat/kernel@0:5.14.0-100?distro=rhel-9.4+eus",
+				},
+			},
+		},
+	}
 
-	filepath := sbomFile.Name()
-	userInput := "sbom:" + filepath
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantErr == nil {
+				tc.wantErr = require.NoError
+			}
 
-	_, err = getSBOMReader(userInput)
-	assert.ErrorAs(t, err, &errEmptySBOM{})
+			packages, ctx, _, err := Provide(tc.userInput, tc.config)
+
+			tc.wantErr(t, err)
+			if err != nil {
+				require.Nil(t, packages)
+				return
+			}
+
+			if d := cmp.Diff(tc.wantContext, ctx, diffOpts...); d != "" {
+				t.Errorf("unexpected context (-want +got):\n%s", d)
+			}
+			require.Len(t, packages, len(tc.wantPkgs))
+
+			slices.SortFunc(packages, func(a, b Package) int {
+				return strings.Compare(a.Name, b.Name)
+			})
+			slices.SortFunc(tc.wantPkgs, func(a, b Package) int {
+				return strings.Compare(a.Name, b.Name)
+			})
+
+			for idx, expected := range tc.wantPkgs {
+				if d := cmp.Diff(expected, packages[idx], diffOpts...); d != "" {
+					t.Errorf("unexpected context (-want +got):\n%s", d)
+				}
+			}
+		})
+	}
+}
+
+func testFixChannels() []distro.FixChannel {
+	return distro.DefaultFixChannels()
 }
