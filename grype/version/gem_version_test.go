@@ -29,6 +29,10 @@ func TestGemVersion_Constraint(t *testing.T) {
 		{version: "1.2.0-x86-linux", constraint: "= 1.2.0", satisfied: true},
 		{version: "1.2.0-x86_64-linux", constraint: "= 1.2.0", satisfied: true},
 		{version: "1.2.0-x86_64-linux", constraint: "< 1.2.1", satisfied: true},
+		{version: "1.19.3-aarch64-linux-gnu", constraint: "= 1.19.3", satisfied: true},
+		{version: "1.19.3-aarch64-linux-gnu", constraint: "< 1.19.3", satisfied: false},
+		{version: "1.19.3-aarch64-linux-musl", constraint: "= 1.19.3", satisfied: true},
+		{version: "1.19.3-aarch64-linux-musl", constraint: "< 1.19.3", satisfied: false},
 		// https://semver.org/#spec-item-11
 		{version: "1.2.0-alpha-x86-linux", constraint: "<1.2.0", satisfied: true},
 		{version: "1.2.0-alpha-1-x86-linux", constraint: "<1.2.0", satisfied: true},
@@ -62,6 +66,8 @@ func Test_cleanPlatformMakesEqualVersions(t *testing.T) {
 		{input: "1.13.1-arm-linux", trimmed: "1.13.1"},
 		{input: "1.13.1-armv6-linux", trimmed: "1.13.1"},
 		{input: "1.13.1-armv7-linux", trimmed: "1.13.1"},
+		{input: "1.13.1-aarch64-linux-gnu", trimmed: "1.13.1"},
+		{input: "1.13.1-aarch64-linux-musl", trimmed: "1.13.1"},
 		{input: "1.13.1-java", trimmed: "1.13.1"},
 		{input: "1.13.1-dalvik", trimmed: "1.13.1"},
 		{input: "1.13.1-mswin32", trimmed: "1.13.1"},
@@ -81,8 +87,8 @@ func Test_cleanPlatformMakesEqualVersions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			original := NewVersion(tt.input, GemFormat)
-			trimmed := NewVersion(tt.trimmed, GemFormat)
+			original := New(tt.input, GemFormat)
+			trimmed := New(tt.trimmed, GemFormat)
 			comp, err := original.Compare(trimmed)
 			require.NoError(t, err)
 			assert.Equal(t, 0, comp)
@@ -222,8 +228,8 @@ func TestGemVersion_Compare(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s_vs_%s", tt.v1, tt.v2), func(t *testing.T) {
-			ver1 := NewVersion(tt.v1, GemFormat)
-			ver2 := NewVersion(tt.v2, GemFormat)
+			ver1 := New(tt.v1, GemFormat)
+			ver2 := New(tt.v2, GemFormat)
 
 			// Test v1 vs v2
 			got1, err1 := ver1.Compare(ver2)

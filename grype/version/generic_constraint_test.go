@@ -67,7 +67,7 @@ func TestGenericConstraint_Satisfied_EmptyConstraint(t *testing.T) {
 	}{
 		{
 			name:    "with valid version",
-			version: NewVersion("1.2.3", SemanticFormat),
+			version: New("1.2.3", SemanticFormat),
 		},
 		{
 			name:    "with nil version",
@@ -75,7 +75,7 @@ func TestGenericConstraint_Satisfied_EmptyConstraint(t *testing.T) {
 		},
 		{
 			name:    "with different format version",
-			version: NewVersion("1.2.3-r1", ApkFormat),
+			version: New("1.2.3-r1", ApkFormat),
 		},
 	}
 
@@ -139,7 +139,7 @@ func TestGenericConstraint_Satisfied_WithConstraint(t *testing.T) {
 			constraint, err := newGenericConstraint(SemanticFormat, test.constraint)
 			require.NoError(t, err)
 
-			version := NewVersion(test.version, SemanticFormat)
+			version := New(test.version, SemanticFormat)
 
 			satisfied, err := constraint.Satisfied(version)
 			if test.shouldError {
@@ -172,6 +172,73 @@ func TestGenericConstraint_Invalid(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := newGenericConstraint(SemanticFormat, test.constraint)
 			require.Error(t, err)
+		})
+	}
+}
+
+func TestGenericConstraint_Satisfied_UnknownFormatComparison(t *testing.T) {
+	tests := []struct {
+		name           string
+		constraintFmt  Format
+		constraint     string
+		versionStr     string
+		versionFmt     Format
+		expectedResult bool
+		wantErr        require.ErrorAssertionFunc
+	}{
+		{
+			name:           "semantic constraint with unknown format version - satisfied",
+			constraintFmt:  SemanticFormat,
+			constraint:     "> 1.0.0",
+			versionStr:     "1.2.3",
+			versionFmt:     UnknownFormat,
+			expectedResult: true,
+		},
+		{
+			name:           "semantic constraint with unknown format version - not satisfied",
+			constraintFmt:  SemanticFormat,
+			constraint:     "> 2.0.0",
+			versionStr:     "1.2.3",
+			versionFmt:     UnknownFormat,
+			expectedResult: false,
+		},
+		{
+			name:           "maven constraint with unknown format version - satisfied",
+			constraintFmt:  MavenFormat,
+			constraint:     ">= 1.0.0",
+			versionStr:     "1.5.0",
+			versionFmt:     UnknownFormat,
+			expectedResult: true,
+		},
+		{
+			name:           "unparseable versions should error",
+			constraintFmt:  SemanticFormat,
+			constraint:     "> george1.0.0",
+			versionStr:     "fred1.2.3-r1",
+			versionFmt:     ApkFormat,
+			expectedResult: false,
+			wantErr:        require.Error,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wantErr == nil {
+				tt.wantErr = require.NoError
+			}
+
+			constraint, err := newGenericConstraint(tt.constraintFmt, tt.constraint)
+			require.NoError(t, err)
+
+			version := New(tt.versionStr, tt.versionFmt)
+
+			satisfied, err := constraint.Satisfied(version)
+			tt.wantErr(t, err)
+
+			if err != nil {
+				return
+			}
+			require.Equal(t, tt.expectedResult, satisfied)
 		})
 	}
 }

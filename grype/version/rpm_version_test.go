@@ -114,8 +114,8 @@ func TestRpmVersion_Compare(t *testing.T) {
 	for _, test := range tests {
 		name := test.v1 + "_vs_" + test.v2
 		t.Run(name, func(t *testing.T) {
-			v1 := NewVersion(test.v1, RpmFormat)
-			v2 := NewVersion(test.v2, RpmFormat)
+			v1 := New(test.v1, RpmFormat)
+			v2 := New(test.v2, RpmFormat)
 
 			actual, err := v1.Compare(v2)
 			require.NoError(t, err, "unexpected error comparing versions: %s vs %s", test.v1, test.v2)
@@ -158,9 +158,9 @@ func TestRpmVersion_Compare_Format(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			thisVer := NewVersion(test.thisVersion, RpmFormat)
+			thisVer := New(test.thisVersion, RpmFormat)
 
-			otherVer := NewVersion(test.otherVersion, test.otherFormat)
+			otherVer := New(test.otherVersion, test.otherFormat)
 
 			result, err := thisVer.Compare(otherVer)
 
@@ -188,7 +188,7 @@ func TestRpmVersion_Compare_EdgeCases(t *testing.T) {
 		{
 			name: "nil version object",
 			setupFunc: func(t testing.TB) (*Version, *Version) {
-				thisVer := NewVersion("1.2.3-1", RpmFormat)
+				thisVer := New("1.2.3-1", RpmFormat)
 				return thisVer, nil
 			},
 			expectError:    true,
@@ -206,6 +206,235 @@ func TestRpmVersion_Compare_EdgeCases(t *testing.T) {
 			if test.errorSubstring != "" {
 				assert.True(t, strings.Contains(err.Error(), test.errorSubstring),
 					"Expected error to contain '%s', got: %v", test.errorSubstring, err)
+			}
+		})
+	}
+}
+
+func TestRpmVersion_CompareWithConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		version  string
+		other    string
+		strategy MissingEpochStrategy
+		want     int // -1, 0, or 1
+	}{
+		{
+			name:     "package has epoch, no behavior change with auto",
+			version:  "1:2.0.0",
+			other:    "1:1.5.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     1, // 1:2.0.0 > 1:1.5.0
+		},
+		{
+			name:     "package has epoch, no behavior change with zero",
+			version:  "1:2.0.0",
+			other:    "1:1.5.0",
+			strategy: "zero",
+			want:     1, // 1:2.0.0 > 1:1.5.0
+		},
+		{
+			name:     "package missing epoch, constraint has epoch, auto strategy - no match",
+			version:  "2.0.0",
+			other:    "1:1.5.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     1, // Treated as 1:2.0.0 > 1:1.5.0
+		},
+		{
+			name:     "package missing epoch, constraint has epoch, zero strategy",
+			version:  "2.0.0",
+			other:    "1:1.5.0",
+			strategy: "zero",
+			want:     -1, // Treated as 0:2.0.0 < 1:1.5.0 (epoch 0 < 1)
+		},
+		{
+			name:     "both missing epoch, auto strategy",
+			version:  "2.0.0",
+			other:    "1.5.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     1, // 2.0.0 > 1.5.0
+		},
+		{
+			name:     "both missing epoch, zero strategy",
+			version:  "2.0.0",
+			other:    "1.5.0",
+			strategy: "zero",
+			want:     1, // 2.0.0 > 1.5.0
+		},
+		{
+			name:     "constraint missing epoch, package has epoch",
+			version:  "1:2.0.0",
+			other:    "1.5.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     1, // 1:2.0.0 > 0:1.5.0 (constraint gets epoch 0)
+		},
+		{
+			name:     "auto strategy, package less than constraint",
+			version:  "1.0.0",
+			other:    "1:1.5.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     -1, // Treated as 1:1.0.0 < 1:1.5.0
+		},
+		{
+			name:     "auto strategy, different epochs on constraints",
+			version:  "1.2.0",
+			other:    "2:1.5.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     -1, // Treated as 2:1.2.0 < 2:1.5.0
+		},
+		{
+			name:     "zero strategy, package version newer but lower epoch",
+			version:  "3.0.0",
+			other:    "1:1.0.0",
+			strategy: "zero",
+			want:     -1, // Treated as 0:3.0.0 < 1:1.0.0 (epoch 0 < 1)
+		},
+		{
+			name:     "auto strategy, equal versions different missing epochs",
+			version:  "1.2.3",
+			other:    "1:1.2.3",
+			strategy: MissingEpochStrategyAuto,
+			want:     0, // Treated as 1:1.2.3 == 1:1.2.3
+		},
+		{
+			name:     "zero strategy, equal versions different missing epochs",
+			version:  "1.2.3",
+			other:    "1:1.2.3",
+			strategy: "zero",
+			want:     -1, // Treated as 0:1.2.3 < 1:1.2.3 (epoch 0 < 1)
+		},
+		{
+			name:     "auto strategy, large epoch difference",
+			version:  "1.0.0",
+			other:    "999:0.5.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     1, // Treated as 999:1.0.0 > 999:0.5.0
+		},
+		{
+			name:     "zero strategy, large epoch difference",
+			version:  "1.0.0",
+			other:    "999:0.5.0",
+			strategy: "zero",
+			want:     -1, // Treated as 0:1.0.0 < 999:0.5.0 (epoch 0 < 999)
+		},
+		{
+			name:     "both have epochs, strategy should not matter",
+			version:  "2:1.5.0",
+			other:    "1:2.0.0",
+			strategy: MissingEpochStrategyAuto,
+			want:     1, // 2:1.5.0 > 1:2.0.0 (epoch takes precedence)
+		},
+		{
+			name:     "both have same epoch, strategy should not matter",
+			version:  "3:2.0.0",
+			other:    "3:1.5.0",
+			strategy: "zero",
+			want:     1, // 3:2.0.0 > 3:1.5.0
+		},
+		{
+			name:     "empty strategy uses default compare behavior (ignores one-sided epochs)",
+			version:  "2.0.0",
+			other:    "1:1.5.0",
+			strategy: "",
+			want:     1, // Falls through to compare() which ignores one-sided epochs: 2.0.0 > 1.5.0
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v1, err := newRpmVersion(tt.version)
+			require.NoError(t, err)
+
+			v2 := &Version{
+				Format: RpmFormat,
+				Raw:    tt.other,
+			}
+
+			cfg := ComparisonConfig{
+				MissingEpochStrategy: tt.strategy,
+			}
+
+			result, err := v1.CompareWithConfig(v2, cfg)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, result,
+				"comparing %s vs %s with strategy %s",
+				tt.version, tt.other, tt.strategy)
+		})
+	}
+}
+
+func TestRpmVersion_CompareWithConfig_ErrorCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		version  string
+		other    *Version
+		strategy MissingEpochStrategy
+		wantErr  bool
+	}{
+		{
+			name:     "nil other version",
+			version:  "1.0.0",
+			other:    nil,
+			strategy: MissingEpochStrategyAuto,
+			wantErr:  true,
+		},
+		{
+			name:     "invalid other version format",
+			version:  "1.0.0",
+			other:    &Version{Format: RpmFormat, Raw: "not:a:valid:version:string:with:too:many:colons"},
+			strategy: MissingEpochStrategyAuto,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v1, err := newRpmVersion(tt.version)
+			require.NoError(t, err)
+
+			cfg := ComparisonConfig{
+				MissingEpochStrategy: tt.strategy,
+			}
+
+			_, err = v1.CompareWithConfig(tt.other, cfg)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestRpmVersion_CompareWithConfig_ConsistencyWithCompare(t *testing.T) {
+	// Test that when both versions have epochs, CompareWithConfig gives same result as Compare
+	tests := []struct {
+		v1 string
+		v2 string
+	}{
+		{"1:2.0.0", "1:1.5.0"},
+		{"2:1.0.0", "1:2.0.0"},
+		{"0:1.2.3", "0:1.2.3"},
+		{"5:1.0.0-1.el7", "5:1.0.0-2.el7"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.v1+"_vs_"+tt.v2, func(t *testing.T) {
+			v1, _ := newRpmVersion(tt.v1)
+			v2 := &Version{Format: RpmFormat, Raw: tt.v2}
+
+			// Test with both strategies
+			for _, strategy := range []MissingEpochStrategy{MissingEpochStrategyZero, MissingEpochStrategyAuto} {
+				cfg := ComparisonConfig{MissingEpochStrategy: strategy}
+
+				resultWithConfig, err1 := v1.CompareWithConfig(v2, cfg)
+				require.NoError(t, err1)
+
+				resultNormal, err2 := v1.Compare(v2)
+				require.NoError(t, err2)
+
+				assert.Equal(t, resultNormal, resultWithConfig,
+					"when both versions have epochs, CompareWithConfig should match Compare (strategy: %s)", strategy)
 			}
 		})
 	}

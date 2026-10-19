@@ -146,19 +146,6 @@ func TestPortageConstraint_Constraint_NilVersion(t *testing.T) {
 	}
 }
 
-func TestPortageVersion_Constraint_UnsupportedFormat(t *testing.T) {
-	c, err := GetConstraint("> 1.0.0", PortageFormat)
-	assert.NoError(t, err)
-
-	// test with a semantic version (wrong format)
-	version := NewVersion("1.2.3", SemanticFormat)
-
-	satisfied, err := c.Satisfied(version)
-	require.Error(t, err)
-	assert.False(t, satisfied)
-	assert.Contains(t, err.Error(), "unsupported version comparison")
-}
-
 func TestPortageConstraint_String(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -214,8 +201,8 @@ func TestPortageVersion_Compare(t *testing.T) {
 	for _, test := range tests {
 		name := test.v1 + "_vs_" + test.v2
 		t.Run(name, func(t *testing.T) {
-			v1 := NewVersion(test.v1, PortageFormat)
-			v2 := NewVersion(test.v2, PortageFormat)
+			v1 := New(test.v1, PortageFormat)
+			v2 := New(test.v2, PortageFormat)
 
 			actual, err := v1.Compare(v2)
 			require.NoError(t, err)
@@ -258,8 +245,8 @@ func TestPortageVersion_Compare_Format(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			thisVer := NewVersion(test.thisVersion, PortageFormat)
-			otherVer := NewVersion(test.otherVersion, test.otherFormat)
+			thisVer := New(test.thisVersion, PortageFormat)
+			otherVer := New(test.otherVersion, test.otherFormat)
 
 			result, err := thisVer.Compare(otherVer)
 
@@ -287,7 +274,7 @@ func TestPortageVersion_Compare_EdgeCases(t *testing.T) {
 		{
 			name: "nil version object",
 			setupFunc: func(t testing.TB) (*Version, *Version) {
-				thisVer := NewVersion("1.2.3", PortageFormat)
+				thisVer := New("1.2.3", PortageFormat)
 				return thisVer, nil
 			},
 			expectError:    true,
@@ -306,6 +293,58 @@ func TestPortageVersion_Compare_EdgeCases(t *testing.T) {
 				assert.True(t, strings.Contains(err.Error(), test.errorSubstring),
 					"Expected error to contain '%s', got: %v", test.errorSubstring, err)
 			}
+		})
+	}
+}
+
+func TestPortageVersion_WithoutNumericComponent(t *testing.T) {
+	// every portage version carries a numeric component, so versionRegexp finds nothing in
+	// values like these. that no-match result used to be indexed unconditionally, which
+	// panicked. the matcher recovers matcher panics into a fatal error, and the fatal path
+	// throws away every match collected so far, so one such package took down the whole scan
+	// instead of just being skipped.
+	nonNumeric := []string{"none", "latest", "rolling", "stable", "git", "N/A", "abc"}
+
+	for _, raw := range nonNumeric {
+		t.Run("package version "+raw, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				_, err := New(raw, PortageFormat).Compare(New("1.2.3", PortageFormat))
+				require.ErrorContains(t, err, "no numeric version component")
+			})
+		})
+
+		t.Run("compared-against version "+raw, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				_, err := New("1.2.3", PortageFormat).Compare(New(raw, PortageFormat))
+				require.ErrorContains(t, err, "no numeric version component")
+			})
+		})
+
+		t.Run("constraint check "+raw, func(t *testing.T) {
+			constraint, err := GetConstraint("< 1.2.3", PortageFormat)
+			require.NoError(t, err)
+
+			require.NotPanics(t, func() {
+				_, err := constraint.Satisfied(New(raw, PortageFormat))
+				require.Error(t, err)
+			})
+		})
+	}
+}
+
+func TestPortageVersion_NumericComponentStillAccepted(t *testing.T) {
+	// guards against the rejection above being tightened into something that turns away
+	// versions portage does accept. the check reuses versionRegexp unanchored, so anything
+	// that compared successfully before still does.
+	accepted := []string{"1", "1.2.3", "1.2.3-r1", "1.2.3_alpha1", "1.2.3b", "12.2", "a1"}
+
+	for _, raw := range accepted {
+		t.Run(raw, func(t *testing.T) {
+			_, err := newPortageVersion(raw)
+			require.NoError(t, err)
+
+			_, err = New(raw, PortageFormat).Compare(New("1.2.3", PortageFormat))
+			require.NoError(t, err)
 		})
 	}
 }

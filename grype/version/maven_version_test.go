@@ -8,6 +8,87 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStripJavaRuntimeQualifier(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "version with jre11",
+			input: "12.10.2.jre11",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version with jdk17",
+			input: "12.10.2.jdk17",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version with uppercase JRE11",
+			input: "12.10.2.JRE11",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version with uppercase JDK17",
+			input: "12.10.2.JDK17",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version with mixed case Jre11",
+			input: "12.10.2.Jre11",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version without qualifier",
+			input: "12.10.2",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version with jre but no digits",
+			input: "12.10.2.jre",
+			want:  "12.10.2.jre",
+		},
+		{
+			name:  "version with jdk but no digits",
+			input: "12.10.2.jdk",
+			want:  "12.10.2.jdk",
+		},
+		{
+			name:  "version with jre0 (zero)",
+			input: "12.10.2.jre0",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version with jdk999 (large number)",
+			input: "12.10.2.jdk999",
+			want:  "12.10.2",
+		},
+		{
+			name:  "version with jre11 followed by SNAPSHOT",
+			input: "12.10.2.jre11-SNAPSHOT",
+			want:  "12.10.2.jre11-SNAPSHOT",
+		},
+		{
+			name:  "version with jdk17 followed by beta",
+			input: "12.10.2.jdk17.beta",
+			want:  "12.10.2.jdk17.beta",
+		},
+		{
+			name:  "version with JRE uppercase followed by SNAPSHOT",
+			input: "12.10.2.JRE11-SNAPSHOT",
+			want:  "12.10.2.JRE11-SNAPSHOT",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripJavaRuntimeQualifier(tt.input)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestMavenVersion_Constraint(t *testing.T) {
 	tests := []testCase{
 		// range expressions
@@ -152,11 +233,47 @@ func TestMavenVersion_Compare(t *testing.T) {
 			v2:   "5.2.25",
 			want: 0,
 		},
+		// JRE/JDK qualifier tests (GitHub issue: JRE version matching)
+		{
+			v1:   "12.10.2",
+			v2:   "12.10.2.jre11",
+			want: 0,
+		},
+		{
+			v1:   "12.10.2.jre11",
+			v2:   "12.10.2",
+			want: 0,
+		},
+		{
+			v1:   "12.10.2.jdk17",
+			v2:   "12.10.2",
+			want: 0,
+		},
+		{
+			v1:   "12.10.2.jre11",
+			v2:   "12.10.2.jdk17",
+			want: 0,
+		},
+		{
+			v1:   "12.10.1",
+			v2:   "12.10.2.jre11",
+			want: -1,
+		},
+		{
+			v1:   "12.10.2.jre11",
+			v2:   "12.10.1",
+			want: 1,
+		},
+		{
+			v1:   "1.2.3.jre8",
+			v2:   "1.2.4.jre8",
+			want: -1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.v1+" vs "+tt.v2, func(t *testing.T) {
-			v1 := NewVersion(tt.v1, MavenFormat)
-			v2 := NewVersion(tt.v2, MavenFormat)
+			v1 := New(tt.v1, MavenFormat)
+			v2 := New(tt.v2, MavenFormat)
 
 			if got, _ := v1.Compare(v2); got != tt.want {
 				t.Errorf("Compare() = %v, want %v", got, tt.want)
@@ -199,8 +316,8 @@ func TestMavenVersion_Compare_Format(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			thisVer := NewVersion(test.thisVersion, MavenFormat)
-			otherVer := NewVersion(test.otherVersion, test.otherFormat)
+			thisVer := New(test.thisVersion, MavenFormat)
+			otherVer := New(test.otherVersion, test.otherFormat)
 
 			result, err := thisVer.Compare(otherVer)
 
@@ -228,7 +345,7 @@ func TestMavenVersion_Compare_EdgeCases(t *testing.T) {
 		{
 			name: "nil version object",
 			setupFunc: func(t testing.TB) (*Version, *Version) {
-				thisVer := NewVersion("1.2.3", MavenFormat)
+				thisVer := New("1.2.3", MavenFormat)
 				return thisVer, nil
 			},
 			expectError:    true,
@@ -241,12 +358,12 @@ func TestMavenVersion_Compare_EdgeCases(t *testing.T) {
 				// version library handles most comparisons, but we can simulate the
 				// error condition by creating a mock that would trigger the last
 				// error condition in the Compare function
-				thisVer := NewVersion("1.2.3", MavenFormat)
+				thisVer := New("1.2.3", MavenFormat)
 
 				// We'd need to modify the otherVer manually to create a scenario
 				// where none of the comparison methods return true, which is unlikely
 				// in real usage but could be simulated for test coverage
-				otherVer := NewVersion("1.2.4", MavenFormat)
+				otherVer := New("1.2.4", MavenFormat)
 
 				return thisVer, otherVer
 			},

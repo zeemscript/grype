@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
+	"github.com/anchore/grype/grype/version"
 	"github.com/anchore/grype/internal/log"
 )
 
@@ -29,6 +31,17 @@ type OSSpecifier struct {
 
 	// LabelVersion is a string that represents a floating version (e.g. "edge" or "unstable") or is the CODENAME field in /etc/os-release (e.g. "wheezy" for debian 7)
 	LabelVersion string
+
+	// Channel is a string that represents a different feed for fix and vulnerability data (e.g. "eus" for RHEL)
+	Channel string
+
+	// DisableAliasing prevents OS aliasing when true (used for exact distro matching)
+	DisableAliasing bool
+
+	// DisableFallback prevents fallback to less specific version matching when true.
+	// When set, only exact version matches are returned (no major-only fallback).
+	// Used for EOL lookups where we don't want e.g. Alpine 3.24 to match Alpine 3.12.
+	DisableFallback bool
 }
 
 func (d *OSSpecifier) clean() {
@@ -120,19 +133,27 @@ type OperatingSystemStoreReader interface {
 	GetOperatingSystems(OSSpecifier) ([]OperatingSystem, error)
 }
 
+type OperatingSystemStoreWriter interface {
+	// UpdateOperatingSystemEOL updates the EOL and EOAS dates for an operating system
+	// matching the given specifier. Returns the number of records updated.
+	UpdateOperatingSystemEOL(spec OSSpecifier, eolDate, eoasDate *time.Time) (int64, error)
+}
+
 type operatingSystemStore struct {
-	db        *gorm.DB
-	blobStore *blobStore
+	db            *gorm.DB
+	blobStore     *blobStore
+	clientVersion *version.Version
 }
 
 func newOperatingSystemStore(db *gorm.DB, bs *blobStore) *operatingSystemStore {
 	return &operatingSystemStore{
-		db:        db,
-		blobStore: bs,
+		db:            db,
+		blobStore:     bs,
+		clientVersion: version.New(fmt.Sprintf("%d.%d.%d", ModelVersion, Revision, Addition), version.SemanticFormat),
 	}
 }
 
-func (s *operatingSystemStore) addOsFromPackages(packages ...*AffectedPackageHandle) error { // nolint:dupl
+func (s *operatingSystemStore) addOsFromPackages(packages ...*packageHandle) error { // nolint:dupl
 	cacheInst, ok := cacheFromContext(s.db.Statement.Context)
 	if !ok {
 		return fmt.Errorf("unable to fetch OS cache from context")
@@ -195,8 +216,11 @@ func (s *operatingSystemStore) GetOperatingSystems(d OSSpecifier) ([]OperatingSy
 	// search for aliases for the given distro; we intentionally map some OSs to other OSs in terms of
 	// vulnerability (e.g. `centos` is an alias for `rhel`). If an alias is found always use that alias in
 	// searches (there will never be anything in the DB for aliased distros).
-	if err := s.applyOSAlias(&d); err != nil {
-		return nil, err
+	// Skip aliasing if explicitly disabled (used for exact distro matching).
+	if !d.DisableAliasing {
+		if err := s.applyOSAlias(&d); err != nil {
+			return nil, err
+		}
 	}
 
 	d.clean()
@@ -222,51 +246,93 @@ func (s *operatingSystemStore) applyOSAlias(d *OSSpecifier) error {
 		return nil
 	}
 
-	var alias *OperatingSystemSpecifierOverride
+	return applyOSSpecifierOverrides(d, aliases, s.clientVersion)
+}
 
-	for _, a := range aliases {
-		if a.Codename != "" && a.Codename != d.LabelVersion {
+func applyOSSpecifierOverrides(d *OSSpecifier, overrides []OperatingSystemSpecifierOverride, clientVersion *version.Version) error {
+	for _, o := range overrides {
+		canUse, err := canUseOverride(o, clientVersion)
+		if err != nil {
+			log.Tracef("failed to check if override %q is applicable for client version %s: %v", o.Alias, clientVersion, err)
+			// we cannot check if we can use this override, so we assume it is applicable
+		} else if !canUse {
+			// this override is not applicable for the current client version
 			continue
 		}
 
-		if a.Version != "" && a.Version != d.version() {
+		if o.Codename != "" && o.Codename != d.LabelVersion {
 			continue
 		}
 
-		if a.VersionPattern != "" && !d.matchesVersionPattern(a.VersionPattern) {
+		if o.Version != "" && o.Version != d.version() {
 			continue
 		}
 
-		alias = &a
+		if o.VersionPattern != "" && !d.matchesVersionPattern(o.VersionPattern) {
+			continue
+		}
+
+		// first match wins, we do not apply any further overrides
+		applyOverride(d, o)
 		break
 	}
 
-	if alias == nil {
-		return nil
+	return nil
+}
+
+func applyOverride(d *OSSpecifier, override OperatingSystemSpecifierOverride) bool {
+	var applied bool
+	if override.ReplacementName != nil {
+		d.Name = *override.ReplacementName
+		applied = true
 	}
 
-	if alias.ReplacementName != nil {
-		d.Name = *alias.ReplacementName
-	}
-
-	if alias.Rolling {
+	if override.Rolling {
 		d.MajorVersion = ""
 		d.MinorVersion = ""
+		applied = true
 	}
 
-	if alias.ReplacementMajorVersion != nil {
-		d.MajorVersion = *alias.ReplacementMajorVersion
+	if override.ReplacementMajorVersion != nil {
+		d.MajorVersion = *override.ReplacementMajorVersion
+		applied = true
 	}
 
-	if alias.ReplacementMinorVersion != nil {
-		d.MinorVersion = *alias.ReplacementMinorVersion
+	if override.ReplacementMinorVersion != nil {
+		d.MinorVersion = *override.ReplacementMinorVersion
+		applied = true
 	}
 
-	if alias.ReplacementLabelVersion != nil {
-		d.LabelVersion = *alias.ReplacementLabelVersion
+	if override.ReplacementLabelVersion != nil {
+		d.LabelVersion = *override.ReplacementLabelVersion
+		applied = true
 	}
 
-	return nil
+	if override.ReplacementChannel != nil {
+		d.Channel = *override.ReplacementChannel
+		applied = true
+	}
+	return applied
+}
+
+func canUseOverride(override OperatingSystemSpecifierOverride, clientVersion *version.Version) (bool, error) {
+	if override.ApplicableClientDBSchemas == "" || clientVersion == nil {
+		return true, nil
+	}
+	c, err := version.GetConstraint(override.ApplicableClientDBSchemas, version.SemanticFormat)
+	if err != nil {
+		return true, fmt.Errorf("unable to parse version constraint: %w", err)
+	}
+	ok, err := c.Satisfied(clientVersion)
+	if err != nil {
+		return true, fmt.Errorf("unable to check if client constraint: %w", err)
+	}
+	if !ok {
+		// explicitly told that this override does not apply to this client version
+		return false, nil
+	}
+
+	return true, nil
 }
 
 func (s *operatingSystemStore) prepareQuery(d OSSpecifier) *gorm.DB {
@@ -280,6 +346,12 @@ func (s *operatingSystemStore) prepareQuery(d OSSpecifier) *gorm.DB {
 		query = query.Where("codename = ? collate nocase OR label_version = ? collate nocase", d.LabelVersion, d.LabelVersion)
 	}
 
+	if d.Channel != "" {
+		query = query.Where("channel = ? collate nocase", d.Channel)
+	} else {
+		// we specifically want to match vanilla...
+		query = query.Where("channel IS NULL OR channel = ''")
+	}
 	return query
 }
 
@@ -312,6 +384,18 @@ func (s *operatingSystemStore) searchForOSExactVersions(query *gorm.DB, d OSSpec
 			if err != nil || len(result) > 0 {
 				return result, err
 			}
+		} else {
+			// empty minor version - exact match for major-only distros (e.g., Debian 8, 9, 10...)
+			majorExclusiveQuery := query.Session(&gorm.Session{}).Where("major_version = ? AND minor_version = ?", d.MajorVersion, "")
+			result, err = handleQuery(majorExclusiveQuery, "major version with empty minor")
+			if err != nil || len(result) > 0 {
+				return result, err
+			}
+		}
+
+		// when fallback is disabled, don't try less specific version matches
+		if d.DisableFallback {
+			return nil, nil
 		}
 
 		// fallback to major version only, requiring the minor version to be blank. Note: it is important that we don't
@@ -334,6 +418,44 @@ func (s *operatingSystemStore) searchForOSExactVersions(query *gorm.DB, d OSSpec
 	}
 
 	return allOs, nil
+}
+
+// UpdateOperatingSystemEOL updates the EOL and EOAS dates for operating systems
+// matching the given specifier. Returns the number of records updated.
+func (s *operatingSystemStore) UpdateOperatingSystemEOL(spec OSSpecifier, eolDate, eoasDate *time.Time) (int64, error) {
+	spec.clean()
+
+	// Build the query to find matching OS records
+	query := s.db.Model(&OperatingSystem{})
+
+	if spec.Name != "" {
+		query = query.Where("name = ? collate nocase", spec.Name)
+	}
+
+	if spec.MajorVersion != "" {
+		query = query.Where("major_version = ?", spec.MajorVersion)
+	}
+
+	if spec.MinorVersion != "" {
+		query = query.Where("minor_version = ?", spec.MinorVersion)
+	}
+
+	if spec.LabelVersion != "" {
+		query = query.Where("codename = ? collate nocase OR label_version = ? collate nocase", spec.LabelVersion, spec.LabelVersion)
+	}
+
+	// Update the EOL fields
+	updates := map[string]any{
+		"eol_date":  eolDate,
+		"eoas_date": eoasDate,
+	}
+
+	result := query.Updates(updates)
+	if result.Error != nil {
+		return 0, fmt.Errorf("failed to update OS EOL data: %w", result.Error)
+	}
+
+	return result.RowsAffected, nil
 }
 
 func trimZeroes(s string) string {

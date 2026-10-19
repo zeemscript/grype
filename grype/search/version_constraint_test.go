@@ -36,11 +36,20 @@ func Test_ByVersion(t *testing.T) {
 			matches: false,
 			reason:  "", // we don't expect a reason to be raised up at this level
 		},
+		{
+			name:    "version parser failure does not return error",
+			version: "badverison-1&170",
+			input: vulnerability.Vulnerability{
+				Constraint: version.MustGetConstraint("< 2.0", version.SemanticFormat),
+			},
+			matches: false,
+			reason:  "version check error",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := version.NewVersion(tt.version, version.SemanticFormat)
+			v := version.New(tt.version, version.SemanticFormat)
 			constraint := ByVersion(*v)
 			matches, reason, err := constraint.MatchesVulnerability(tt.input)
 			wantErr := require.NoError
@@ -97,6 +106,86 @@ func Test_ByConstraintFunc(t *testing.T) {
 			wantErr(t, err)
 			assert.Equal(t, tt.matches, matches)
 			assert.Equal(t, tt.reason, reason)
+		})
+	}
+}
+
+func Test_ByFixedVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		input   vulnerability.Vulnerability
+		matches bool
+	}{
+		{
+			name:    "fixed version is lower",
+			version: "1.1.0",
+			input: vulnerability.Vulnerability{
+				Fix: vulnerability.Fix{
+					Versions: []string{"1.0.0"},
+					State:    vulnerability.FixStateFixed,
+				},
+			},
+			matches: true,
+		},
+		{
+			name:    "fixed version is equal",
+			version: "1.1.0",
+			input: vulnerability.Vulnerability{
+				Fix: vulnerability.Fix{
+					Versions: []string{"1.1.0"},
+					State:    vulnerability.FixStateFixed,
+				},
+			},
+			matches: true,
+		},
+		{
+			name:    "one of multiple fix versions matches",
+			version: "1.1.0",
+			input: vulnerability.Vulnerability{
+				Fix: vulnerability.Fix{
+					Versions: []string{"1.0.0", "1.2.0"},
+					State:    vulnerability.FixStateFixed,
+				},
+			},
+			matches: true,
+		},
+		{
+			name:    "fixed version is higher",
+			version: "1.1.0",
+			input: vulnerability.Vulnerability{
+				Fix: vulnerability.Fix{
+					Versions: []string{"1.2.0"},
+					State:    vulnerability.FixStateFixed,
+				},
+			},
+			matches: false,
+		},
+		{
+			name:    "no fix versions",
+			version: "1.1.0",
+			input: vulnerability.Vulnerability{
+				Fix: vulnerability.Fix{
+					Versions: []string{},
+					State:    vulnerability.FixStateWontFix,
+				},
+			},
+			matches: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := version.New(tt.version, version.SemanticFormat)
+			constraint := ByFixedVersion(*v)
+			matches, reason, err := constraint.MatchesVulnerability(tt.input)
+			require.NoError(t, err)
+			assert.Equal(t, tt.matches, matches)
+			if matches {
+				assert.NotEmpty(t, reason)
+			} else {
+				assert.Empty(t, reason)
+			}
 		})
 	}
 }

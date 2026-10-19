@@ -1,39 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "anchore.io/schema/grype/db-search/json/1.0.3/matches",
+  "$id": "anchore.io/schema/grype/db-search/json/1.1.7/matches",
   "$ref": "#/$defs/Matches",
   "$defs": {
-    "AffectedPackageBlob": {
-      "$defs": {
-        "cves": {
-          "description": "is a list of Common Vulnerabilities and Exposures (CVE) identifiers related to this vulnerability."
-        },
-        "qualifiers": {
-          "description": "are package attributes that confirm the package is affected by the vulnerability."
-        },
-        "ranges": {
-          "description": "specifies the affected version ranges and fixes if available."
-        }
-      },
-      "properties": {
-        "cves": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "qualifiers": {
-          "$ref": "#/$defs/AffectedPackageQualifiers"
-        },
-        "ranges": {
-          "items": {
-            "$ref": "#/$defs/AffectedRange"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
-    },
     "AffectedPackageInfo": {
       "$defs": {
         "cpe": {
@@ -43,7 +12,7 @@
           "description": "is the detailed information about the affected package"
         },
         "namespace": {
-          "description": "is a holdover value from the v5 DB schema that combines provider and search methods into a single value\nDeprecated: this field will be removed in a later version of the search schema"
+          "description": "is a holdover value from the v5 DB schema that combines provider and search methods into a single value\n\nDeprecated: this field will be removed in a later version of the search schema"
         },
         "os": {
           "description": "identifies the operating system release that the affected package is released for"
@@ -66,7 +35,7 @@
           "type": "string"
         },
         "detail": {
-          "$ref": "#/$defs/AffectedPackageBlob"
+          "$ref": "#/$defs/PackageBlob"
         }
       },
       "type": "object",
@@ -74,66 +43,6 @@
         "namespace",
         "detail"
       ]
-    },
-    "AffectedPackageQualifiers": {
-      "$defs": {
-        "platform_cpes": {
-          "description": "lists Common Platform Enumeration (CPE) identifiers for affected platforms."
-        },
-        "rpm_modularity": {
-          "description": "indicates if the package follows RPM modularity for versioning."
-        }
-      },
-      "properties": {
-        "rpm_modularity": {
-          "type": "string"
-        },
-        "platform_cpes": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
-    },
-    "AffectedRange": {
-      "$defs": {
-        "fix": {
-          "description": "provides details on the fix version and its state if available."
-        },
-        "version": {
-          "description": "defines the version constraints for affected software."
-        }
-      },
-      "properties": {
-        "version": {
-          "$ref": "#/$defs/AffectedVersion"
-        },
-        "fix": {
-          "$ref": "#/$defs/Fix"
-        }
-      },
-      "type": "object"
-    },
-    "AffectedVersion": {
-      "$defs": {
-        "constraint": {
-          "description": "defines the version range constraint for affected versions."
-        },
-        "type": {
-          "description": "specifies the versioning system used (e.g., 'semver', 'rpm')."
-        }
-      },
-      "properties": {
-        "type": {
-          "type": "string"
-        },
-        "constraint": {
-          "type": "string"
-        }
-      },
-      "type": "object"
     },
     "CPE": {
       "properties": {
@@ -189,6 +98,29 @@
         "Packages"
       ]
     },
+    "CWE": {
+      "properties": {
+        "cve": {
+          "type": "string"
+        },
+        "cwe": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "cve",
+        "cwe",
+        "source",
+        "type"
+      ]
+    },
     "EPSS": {
       "properties": {
         "cve": {
@@ -237,25 +169,38 @@
       },
       "type": "object"
     },
-    "FixDetail": {
+    "FixAvailability": {
       "$defs": {
-        "git_commit": {
-          "description": "is the identifier for the Git commit associated with the fix."
+        "date": {
+          "description": "is the date and time when fix information became available. Note: this might not be when the fix was created, committed or merged."
         },
-        "references": {
-          "description": "contains URLs or identifiers for additional resources on the fix."
-        },
-        "timestamp": {
-          "description": "is the date and time when the fix was committed."
+        "kind": {
+          "description": "describes how this date was obtained (e.g. advisory, release, commit, PR, issue, first-observed-record)"
         }
       },
       "properties": {
-        "git_commit": {
-          "type": "string"
-        },
-        "timestamp": {
+        "date": {
           "type": "string",
           "format": "date-time"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "FixDetail": {
+      "$defs": {
+        "available": {
+          "description": "indicates when the fix information became available and how it was obtained."
+        },
+        "references": {
+          "description": "contains URLs or identifiers for additional resources on the fix."
+        }
+      },
+      "properties": {
+        "available": {
+          "$ref": "#/$defs/FixAvailability"
         },
         "references": {
           "items": {
@@ -265,6 +210,31 @@
         }
       },
       "type": "object"
+    },
+    "GoImport": {
+      "$defs": {
+        "path": {
+          "description": "is the import path of the package within the affected module (e.g. 'golang.org/x/net/html')."
+        },
+        "symbols": {
+          "description": "lists the vulnerable function/method names within the package (e.g. 'Parse' or 'Decoder.Decode').\nAn empty list means the entire package is considered vulnerable."
+        }
+      },
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "symbols": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "path"
+      ]
     },
     "KnownExploited": {
       "properties": {
@@ -343,6 +313,31 @@
       },
       "type": "array"
     },
+    "Modification": {
+      "$defs": {
+        "changes": {
+          "description": "describes each amendment made to the record (e.g. 'added go symbols to affected package golang.org/x/net')."
+        },
+        "url": {
+          "description": "points to the source data the record was modified with (e.g. 'https://vuln.go.dev/ID/GO-2024-2687.json')."
+        }
+      },
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "changes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "url"
+      ]
+    },
     "OperatingSystem": {
       "properties": {
         "name": {
@@ -373,8 +368,104 @@
         "ecosystem"
       ]
     },
+    "PackageBlob": {
+      "$defs": {
+        "cves": {
+          "description": "is a list of Common Vulnerabilities and Exposures (CVE) identifiers related to this vulnerability."
+        },
+        "qualifiers": {
+          "description": "are package attributes that confirm the package is affected by the vulnerability."
+        },
+        "ranges": {
+          "description": "specifies the affected version ranges and fixes if available."
+        }
+      },
+      "properties": {
+        "cves": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "qualifiers": {
+          "$ref": "#/$defs/PackageQualifiers"
+        },
+        "ranges": {
+          "items": {
+            "$ref": "#/$defs/Range"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "PackageQualifiers": {
+      "$defs": {
+        "architecture": {
+          "description": "is the architecture of the affected RPM, copied from the source PURL's\n`arch` qualifier when present (e.g. 'src', 'x86_64') or set to a synthesized sentinel\nlike 'binary-no-arch-specified' when a binary RPM was disclosed without an explicit\narch. Upstream-indirected RPM matches drop entries tagged with any arch other than\n'src', so providers that disclose at binary granularity (e.g. hummingbird CSAF VEX)\navoid FP-matching unrelated sibling binaries built from the same source. See\npkg/qualifier/architecture for the constants."
+        },
+        "go_imports": {
+          "description": "lists the packages and symbols within an affected Go module that contain the vulnerability\n(from govulndb's ecosystem_specific.imports). When set, packages carrying binary symbol evidence only\nmatch if at least one of the listed symbols is present in the binary."
+        },
+        "platform_cpes": {
+          "description": "lists Common Platform Enumeration (CPE) identifiers for affected platforms."
+        },
+        "rootio": {
+          "description": "indicates that the vulnerability applies only to Root IO packages (packages with Root IO fixes).\nWhen true, standard packages will not match this vulnerability (NAK pattern)."
+        },
+        "rpm_modularity": {
+          "description": "indicates if the package follows RPM modularity for versioning."
+        }
+      },
+      "properties": {
+        "rpm_modularity": {
+          "type": "string"
+        },
+        "platform_cpes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "rootio": {
+          "type": "boolean"
+        },
+        "go_imports": {
+          "items": {
+            "$ref": "#/$defs/GoImport"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Range": {
+      "$defs": {
+        "fix": {
+          "description": "provides details on the fix version and its state if available."
+        },
+        "version": {
+          "description": "defines the version constraints for affected software."
+        }
+      },
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/Version"
+        },
+        "fix": {
+          "$ref": "#/$defs/Fix"
+        }
+      },
+      "type": "object"
+    },
     "Reference": {
       "$defs": {
+        "id": {
+          "description": "is an optional identifier for the reference (e.g., advisory ID like 'RHSA-2023:5455')"
+        },
         "tags": {
           "description": "is a free-form organizational field to convey additional information about the reference"
         },
@@ -384,6 +475,9 @@
       },
       "properties": {
         "url": {
+          "type": "string"
+        },
+        "id": {
           "type": "string"
         },
         "tags": {
@@ -432,8 +526,30 @@
         "rank"
       ]
     },
+    "Version": {
+      "$defs": {
+        "constraint": {
+          "description": "defines the version range constraint for affected versions."
+        },
+        "type": {
+          "description": "specifies the versioning system used (e.g., 'semver', 'rpm')."
+        }
+      },
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "constraint": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "VulnerabilityInfo": {
       "$defs": {
+        "cwes": {
+          "description": "is a list of Common Weakness Enumeration (CWE) identifiers for the vulnerability"
+        },
         "epss": {
           "description": "is a list of Exploit Prediction Scoring System (EPSS) scores for the vulnerability"
         },
@@ -490,6 +606,12 @@
           },
           "type": "array"
         },
+        "modifications": {
+          "items": {
+            "$ref": "#/$defs/Modification"
+          },
+          "type": "array"
+        },
         "severity": {
           "type": "string"
         },
@@ -520,6 +642,12 @@
         "epss": {
           "items": {
             "$ref": "#/$defs/EPSS"
+          },
+          "type": "array"
+        },
+        "cwes": {
+          "items": {
+            "$ref": "#/$defs/CWE"
           },
           "type": "array"
         }

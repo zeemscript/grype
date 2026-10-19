@@ -7,17 +7,17 @@ import (
 	"github.com/facebookincubator/nvdtools/wfn"
 	"github.com/scylladb/go-set/strset"
 
-	"github.com/anchore/grype/grype/internal"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/search"
 	"github.com/anchore/grype/grype/vulnerability"
 	"github.com/anchore/syft/syft/cpe"
 	syftPkg "github.com/anchore/syft/syft/pkg"
+	syftCPE "github.com/anchore/syft/syft/pkg/cataloger/common/cpe"
 )
 
-// onlyVulnerableTargets returns a criteria object that tests vulnerability qualifiers against the package vulnerability rules.
+// OnlyVulnerableTargets returns a criteria object that tests vulnerability qualifiers against the package vulnerability rules.
 // TODO: in the future this should be moved to underneath the store to avoid the need to recompute CPE comparisons and to leverage ecosystem aliases for target software
-func onlyVulnerableTargets(p pkg.Package) vulnerability.Criteria {
+func OnlyVulnerableTargets(p pkg.Package) vulnerability.Criteria {
 	return search.ByFunc(func(v vulnerability.Vulnerability) (bool, string, error) {
 		matches, reasons := isVulnerableTarget(p, v)
 		return matches, reasons, nil
@@ -83,7 +83,7 @@ func refuteTargetSoftwareByPackageAttributes(p pkg.Package, vuln vulnerability.V
 		mismatchWithUnknownLanguage := syftPkg.LanguageByName(targetSW) != p.Language && isUnknownTarget(targetSW)
 		unspecifiedTargetSW := targetSW == wfn.Any || targetSW == wfn.NA
 		matchesByLanguage := syftPkg.LanguageByName(targetSW) == p.Language
-		matchesByPackageType := internal.CPETargetSoftwareToPackageType(targetSW) == p.Type
+		matchesByPackageType := syftCPE.TargetSoftwareToPackageType(targetSW) == p.Type
 		if unspecifiedTargetSW || matchesByLanguage || matchesByPackageType || mismatchWithUnknownLanguage {
 			return true, ""
 		}
@@ -164,7 +164,7 @@ func normalizeTargetSoftwares(ts []string) *strset.Set {
 	normalizedTargetSWs := strset.New()
 	for _, ts := range ts {
 		// Attempt to normalize target sw to package type, e.g. node and nodejs should match
-		pt := string(internal.CPETargetSoftwareToPackageType(ts))
+		pt := string(syftCPE.TargetSoftwareToPackageType(ts))
 		if pt == "" && ts != "*" && ts != "?" && ts != "-" {
 			// normalizing failed; preserve raw cpe target sw string as the type
 			// unless it is wildcard

@@ -59,12 +59,12 @@ func TestVersionCompare(t *testing.T) {
 					if tc.expectErr == nil {
 						tc.expectErr = require.NoError
 					}
-					v1 := NewVersion(tc.v1, format)
+					v1 := New(tc.v1, format)
 					require.Equal(t, format, v1.Format)
 
 					var v2 *Version
 					if tc.v2 != "" {
-						v2 = NewVersion(tc.v2, format)
+						v2 = New(tc.v2, format)
 						require.Equal(t, format, v2.Format)
 					}
 
@@ -83,10 +83,10 @@ func TestVersionCompare(t *testing.T) {
 }
 
 func TestVersion_UpgradeUnknownRightSideComparison(t *testing.T) {
-	v1 := NewVersion("1.0.0", SemanticFormat)
+	v1 := New("1.0.0", SemanticFormat)
 
 	// test if we can upgrade an unknown format to a known format when the left hand side is known
-	v2 := NewVersion("1.0.0", UnknownFormat)
+	v2 := New("1.0.0", UnknownFormat)
 
 	result, err := v1.Compare(v2)
 	assert.NoError(t, err)
@@ -116,8 +116,8 @@ func TestVersionCompareSameFormat(t *testing.T) {
 		t.Run(fmt.name, func(t *testing.T) {
 			// just test that we can create and compare versions of this format
 			// without errors - not testing the actual comparison logic
-			v1 := NewVersion("1.0.0", fmt.format)
-			v2 := NewVersion("1.0.0", fmt.format)
+			v1 := New("1.0.0", fmt.format)
+			v2 := New("1.0.0", fmt.format)
 
 			result, err := v1.Compare(v2)
 			assert.NoError(t, err, "comparison error")
@@ -137,161 +137,161 @@ func TestVersion_Is(t *testing.T) {
 	}{
 		{
 			name:     "equal versions - EQ operator",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: EQ,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "equal versions - empty operator (defaults to EQ)",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: "",
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "unequal versions - EQ operator",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: EQ,
-			other:    NewVersion("2.0.0", SemanticFormat),
+			other:    New("2.0.0", SemanticFormat),
 			expected: false,
 		},
 		{
 			name:     "greater than - GT operator true",
-			version:  NewVersion("2.0.0", SemanticFormat),
+			version:  New("2.0.0", SemanticFormat),
 			operator: GT,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "greater than - GT operator false",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: GT,
-			other:    NewVersion("2.0.0", SemanticFormat),
+			other:    New("2.0.0", SemanticFormat),
 			expected: false,
 		},
 		{
 			name:     "greater than or equal - GTE operator true (greater)",
-			version:  NewVersion("2.0.0", SemanticFormat),
+			version:  New("2.0.0", SemanticFormat),
 			operator: GTE,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "greater than or equal - GTE operator true (equal)",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: GTE,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "greater than or equal - GTE operator false",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: GTE,
-			other:    NewVersion("2.0.0", SemanticFormat),
+			other:    New("2.0.0", SemanticFormat),
 			expected: false,
 		},
 		{
 			name:     "less than - LT operator true",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: LT,
-			other:    NewVersion("2.0.0", SemanticFormat),
+			other:    New("2.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "less than - LT operator false",
-			version:  NewVersion("2.0.0", SemanticFormat),
+			version:  New("2.0.0", SemanticFormat),
 			operator: LT,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: false,
 		},
 		{
 			name:     "less than or equal - LTE operator true (less)",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: LTE,
-			other:    NewVersion("2.0.0", SemanticFormat),
+			other:    New("2.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "less than or equal - LTE operator true (equal)",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: LTE,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "less than or equal - LTE operator false",
-			version:  NewVersion("2.0.0", SemanticFormat),
+			version:  New("2.0.0", SemanticFormat),
 			operator: LTE,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: false,
 		},
 		{
 			name:     "nil other version should return ErrNoVersionProvided",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: EQ,
 			other:    nil,
 			wantErr:  require.Error,
 		},
 		{
 			name:     "unknown operator should return error",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: "unknown",
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			wantErr:  require.Error,
 		},
 		{
 			name:     "invalid version format should return error",
-			version:  NewVersion("invalid", SemanticFormat),
+			version:  New("invalid", SemanticFormat),
 			operator: EQ,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			wantErr:  require.Error,
 		},
 		{
 			name:     "different formats - semantic vs apk",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: EQ,
-			other:    NewVersion("1.0.0", ApkFormat),
+			other:    New("1.0.0", ApkFormat),
 			expected: true,
 		},
 		{
 			name:     "complex semantic versions",
-			version:  NewVersion("1.2.3-alpha.1", SemanticFormat),
+			version:  New("1.2.3-alpha.1", SemanticFormat),
 			operator: LT,
-			other:    NewVersion("1.2.3", SemanticFormat),
+			other:    New("1.2.3", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "version with v prefix",
-			version:  NewVersion("v1.0.0", SemanticFormat),
+			version:  New("v1.0.0", SemanticFormat),
 			operator: EQ,
-			other:    NewVersion("1.0.0", SemanticFormat),
+			other:    New("1.0.0", SemanticFormat),
 			expected: true,
 		},
 		{
 			name:     "nil other version is ErrNoVersionProvided",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: EQ,
 			other:    nil,
-			wantErr: func(t require.TestingT, err error, a ...interface{}) {
+			wantErr: func(t require.TestingT, err error, a ...any) {
 				require.ErrorIs(t, err, ErrNoVersionProvided, a...)
 			},
 		},
 		{
 			name:     "unknown operator error",
-			version:  NewVersion("1.0.0", SemanticFormat),
+			version:  New("1.0.0", SemanticFormat),
 			operator: "!@#",
-			other:    NewVersion("1.0.0", SemanticFormat),
-			wantErr: func(t require.TestingT, err error, a ...interface{}) {
+			other:    New("1.0.0", SemanticFormat),
+			wantErr: func(t require.TestingT, err error, a ...any) {
 				require.ErrorContains(t, err, "unknown operator !@#", a...)
 			},
 		},
 		{
 			name:     "invalid version format error contains format",
-			version:  NewVersion("not-a-valid-version", SemanticFormat),
+			version:  New("not-a-valid-version", SemanticFormat),
 			operator: EQ,
-			other:    NewVersion("1.0.0", SemanticFormat),
-			wantErr: func(t require.TestingT, err error, a ...interface{}) {
+			other:    New("1.0.0", SemanticFormat),
+			wantErr: func(t require.TestingT, err error, a ...any) {
 				require.ErrorContains(t, err, "unable to get comparator for Semantic", a...)
 			},
 		},
@@ -316,9 +316,9 @@ func TestVersion_Is(t *testing.T) {
 }
 
 func TestVersion_Is_AllOperators(t *testing.T) {
-	v1 := NewVersion("1.0.0", SemanticFormat)
-	v2 := NewVersion("2.0.0", SemanticFormat)
-	v1dup := NewVersion("1.0.0", SemanticFormat)
+	v1 := New("1.0.0", SemanticFormat)
+	v2 := New("2.0.0", SemanticFormat)
+	v1dup := New("1.0.0", SemanticFormat)
 
 	tests := []struct {
 		name     string
@@ -358,6 +358,61 @@ func TestVersion_Is_AllOperators(t *testing.T) {
 			result, err := tt.left.Is(tt.operator, tt.right)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestVersion_Compare_HonorsEmbeddedConfig verifies that Version.Compare and Version.Is route through the
+// config-aware comparison when the receiver carries a MissingEpochStrategy (deb/rpm), rather than silently
+// ignoring it. The classic case: an installed version missing the epoch that the constraint/fix carries.
+func TestVersion_Compare_HonorsEmbeddedConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   Format
+		pkg      string // receiver (package), missing epoch
+		other    string // fix/constraint, carries epoch
+		strategy MissingEpochStrategy
+		wantCmp  int
+	}{
+		{
+			name:     "deb auto adopts constraint epoch - equal builds compare equal",
+			format:   DebFormat,
+			pkg:      "8.2p1-4ubuntu0.13+esm1",
+			other:    "1:8.2p1-4ubuntu0.13+esm1",
+			strategy: MissingEpochStrategyAuto,
+			wantCmp:  0,
+		},
+		{
+			name:     "deb zero treats missing epoch as 0 - lower than epoch 1",
+			format:   DebFormat,
+			pkg:      "8.2p1-4ubuntu0.13+esm1",
+			other:    "1:8.2p1-4ubuntu0.13+esm1",
+			strategy: MissingEpochStrategyZero,
+			wantCmp:  -1,
+		},
+		{
+			name:     "rpm auto adopts constraint epoch - equal builds compare equal",
+			format:   RpmFormat,
+			pkg:      "5.14.0-427.68.1.el9_4",
+			other:    "1:5.14.0-427.68.1.el9_4",
+			strategy: MissingEpochStrategyAuto,
+			wantCmp:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkgV := NewWithConfig(tt.pkg, tt.format, ComparisonConfig{MissingEpochStrategy: tt.strategy})
+			other := New(tt.other, tt.format)
+
+			cmp, err := pkgV.Compare(other)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCmp, cmp, "Compare")
+
+			// Is must agree with Compare (spot-check the equality operator)
+			isEq, err := pkgV.Is(EQ, other)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCmp == 0, isEq, "Is(EQ)")
 		})
 	}
 }

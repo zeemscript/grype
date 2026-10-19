@@ -1,8 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "anchore.io/schema/grype/db-search-vuln/json/1.0.3/vulnerabilities",
+  "$id": "anchore.io/schema/grype/db-search-vuln/json/1.0.6/vulnerabilities",
   "$ref": "#/$defs/Vulnerabilities",
   "$defs": {
+    "CWE": {
+      "properties": {
+        "cve": {
+          "type": "string"
+        },
+        "cwe": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "cve",
+        "cwe",
+        "source",
+        "type"
+      ]
+    },
     "EPSS": {
       "properties": {
         "cve": {
@@ -71,6 +94,31 @@
         "known_ransomware_campaign_use"
       ]
     },
+    "Modification": {
+      "$defs": {
+        "changes": {
+          "description": "describes each amendment made to the record (e.g. 'added go symbols to affected package golang.org/x/net')."
+        },
+        "url": {
+          "description": "points to the source data the record was modified with (e.g. 'https://vuln.go.dev/ID/GO-2024-2687.json')."
+        }
+      },
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "changes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "url"
+      ]
+    },
     "OperatingSystem": {
       "properties": {
         "name": {
@@ -88,6 +136,9 @@
     },
     "Reference": {
       "$defs": {
+        "id": {
+          "description": "is an optional identifier for the reference (e.g., advisory ID like 'RHSA-2023:5455')"
+        },
         "tags": {
           "description": "is a free-form organizational field to convey additional information about the reference"
         },
@@ -97,6 +148,9 @@
       },
       "properties": {
         "url": {
+          "type": "string"
+        },
+        "id": {
           "type": "string"
         },
         "tags": {
@@ -191,6 +245,12 @@
           },
           "type": "array"
         },
+        "modifications": {
+          "items": {
+            "$ref": "#/$defs/Modification"
+          },
+          "type": "array"
+        },
         "severity": {
           "type": "string"
         },
@@ -221,6 +281,12 @@
         "epss": {
           "items": {
             "$ref": "#/$defs/EPSS"
+          },
+          "type": "array"
+        },
+        "cwes": {
+          "items": {
+            "$ref": "#/$defs/CWE"
           },
           "type": "array"
         },

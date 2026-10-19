@@ -3,890 +3,836 @@ package apk
 import (
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/anchore/grype/grype/distro"
+	"github.com/anchore/grype/grype/internal/ignorereasons"
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/version"
 	"github.com/anchore/grype/grype/vulnerability"
-	"github.com/anchore/grype/grype/vulnerability/mock"
-	"github.com/anchore/syft/syft/cpe"
+	"github.com/anchore/grype/internal/dbtest"
+	"github.com/anchore/syft/syft/artifact"
 	syftPkg "github.com/anchore/syft/syft/pkg"
 )
 
-func TestSecDBOnlyMatch(t *testing.T) {
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			// ID doesn't match - this is the key for comparison in the matcher
-			ID:        "CVE-2020-2",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("<= 0.9.11", version.ApkFormat),
-	}
+// reasonCPENotVulnerable is the IgnoreRelatedPackage reason emitted by
+// MatchPackageByCPEs for CPE matches that resolved a vulnerability record
+// for the package's CPE but whose version constraint is not satisfied by
+// the package version (i.e., NVD says "not vulnerable at this version").
+const reasonCPENotVulnerable = "CPE not vulnerable"
 
-	vp := mock.VulnerabilityProvider(secDbVuln)
+// === direct match (secdb) ===
 
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
+func TestMatcherApk_DirectMatch_Alpine(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			// alpine 3.18 fix: openssl 3.1.4-r5
+			p := dbtest.NewPackage("openssl", "3.1.4-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.Alpine318).
+				Build()
 
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.9",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:libvncserver:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	expected := []match.Match{
-		{
-
-			Vulnerability: secDbVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.ExactDirectMatch,
-					Confidence: 1.0,
-					SearchedBy: match.DistroParameters{
-						Distro: match.DistroIdentification{
-							Type:    d.Type.String(),
-							Version: d.Version,
-						},
-						Package: match.PackageParameter{
-							Name:    "libvncserver",
-							Version: "0.9.9",
-						},
-						Namespace: "secdb:distro:alpine:3.12",
-					},
-					Found: match.DistroResult{
-						VulnerabilityID:   "CVE-2020-2",
-						VersionConstraint: secDbVuln.Constraint.String(),
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactDirectMatch).
+				AsDistroSearch()
+		})
 }
 
-func TestBothSecdbAndNvdMatches(t *testing.T) {
-	// NVD and Alpine's secDB both have the same CVE ID for the package
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("<= 0.9.11", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):libvncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-	}
+func TestMatcherApk_DirectMatch_Wolfi(t *testing.T) {
+	dbtest.DBs(t, "wolfi-rolling").
+		SelectOnly("wolfi:rolling/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			// wolfi fix: openssl 3.2.1-r0
+			p := dbtest.NewPackage("openssl", "3.1.0-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.WolfiRolling).
+				Build()
 
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			// ID *does* match - this is the key for comparison in the matcher
-			ID:        "CVE-2020-1",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("<= 0.9.11", version.ApkFormat),
-	}
-
-	vp := mock.VulnerabilityProvider(nvdVuln, secDbVuln)
-
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.9",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:libvncserver:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	expected := []match.Match{
-		{
-			// ensure the SECDB record is preferred over the NVD record
-			Vulnerability: secDbVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.ExactDirectMatch,
-					Confidence: 1.0,
-					SearchedBy: match.DistroParameters{
-						Distro: match.DistroIdentification{
-							Type:    d.Type.String(),
-							Version: d.Version,
-						},
-						Package: match.PackageParameter{
-							Name:    "libvncserver",
-							Version: "0.9.9",
-						},
-						Namespace: "secdb:distro:alpine:3.12",
-					},
-					Found: match.DistroResult{
-						VulnerabilityID:   "CVE-2020-1",
-						VersionConstraint: secDbVuln.Constraint.String(),
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactDirectMatch).
+				AsDistroSearch()
+		})
 }
 
-func TestBothSecdbAndNvdMatches_DifferentFixInfo(t *testing.T) {
-	// NVD and Alpine's secDB both have the same CVE ID for the package
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("< 1.0.0", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):libvncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-		Fix: vulnerability.Fix{
-			Versions: []string{"1.0.0"},
-			State:    vulnerability.FixStateFixed,
-		},
-	}
+// TestMatcherApk_IndirectMatchBySource verifies the upstream/origin
+// indirection path: alpine secdb keys CVE-2024-0727 by openssl; libssl3 is
+// a subpackage whose apk origin is openssl, so the match resolves via
+// findMatchesForOriginPackage.
+func TestMatcherApk_IndirectMatchBySource(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			p := dbtest.NewPackage("libssl3", "3.1.4-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.Alpine318).
+				WithUpstream("openssl", "").
+				Build()
 
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			// ID *does* match - this is the key for comparison in the matcher
-			ID:        "CVE-2020-1",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("< 0.9.12", version.ApkFormat),
-		// SecDB indicates Alpine have backported a fix to v0.9...
-		Fix: vulnerability.Fix{
-			Versions: []string{"0.9.12"},
-			State:    vulnerability.FixStateFixed,
-		},
-	}
-	vp := mock.VulnerabilityProvider(nvdVuln, secDbVuln)
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.9",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:libvncserver:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	expected := []match.Match{
-		{
-			// ensure the SECDB record is preferred over the NVD record
-			Vulnerability: secDbVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.ExactDirectMatch,
-					Confidence: 1.0,
-					SearchedBy: match.DistroParameters{
-						Distro: match.DistroIdentification{
-							Type:    d.Type.String(),
-							Version: d.Version,
-						},
-						Package: match.PackageParameter{
-							Name:    "libvncserver",
-							Version: "0.9.9",
-						},
-						Namespace: "secdb:distro:alpine:3.12",
-					},
-					Found: match.DistroResult{
-						VulnerabilityID:   "CVE-2020-1",
-						VersionConstraint: secDbVuln.Constraint.String(),
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactIndirectMatch).
+				AsDistroSearch()
+		})
 }
 
-func TestBothSecdbAndNvdMatches_DifferentPackageName(t *testing.T) {
-	// NVD and Alpine's secDB both have the same CVE ID for the package
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("<= 0.9.11", version.UnknownFormat),
-		// Note: the product name is NOT the same as the target package name
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:lib_vnc_project-(server):libvncumbrellaproject:*:*:*:*:*:*:*:*", ""),
-		},
-	}
+// TestMatcherApk_SecdbMatchesWithoutCpe verifies that a package with no
+// CPEs still gets secdb matches: cpeMatchesWithoutSecDBFixes returns
+// internal.ErrEmptyCPEMatch which the matcher swallows so the secdb path
+// continues uninterrupted.
+func TestMatcherApk_SecdbMatchesWithoutCpe(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			p := dbtest.NewPackage("openssl", "3.1.4-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.Alpine318).
+				Build()
 
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			// ID *does* match - this is the key for comparison in the matcher
-			ID:        "CVE-2020-1",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("<= 0.9.11", version.ApkFormat),
-	}
-
-	vp := mock.VulnerabilityProvider(nvdVuln, secDbVuln)
-
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.9",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			// Note: the product name is NOT the same as the package name
-			cpe.Must("cpe:2.3:a:*:libvncumbrellaproject:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	expected := []match.Match{
-		{
-			// ensure the SECDB record is preferred over the NVD record
-			Vulnerability: secDbVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.ExactDirectMatch,
-					Confidence: 1.0,
-					SearchedBy: match.DistroParameters{
-						Distro: match.DistroIdentification{
-							Type:    d.Type.String(),
-							Version: d.Version,
-						},
-						Package: match.PackageParameter{
-							Name:    "libvncserver",
-							Version: "0.9.9",
-						},
-						Namespace: "secdb:distro:alpine:3.12",
-					},
-					Found: match.DistroResult{
-						VulnerabilityID:   "CVE-2020-1",
-						VersionConstraint: secDbVuln.Constraint.String(),
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactDirectMatch).
+				AsDistroSearch()
+		})
 }
 
-func TestNvdOnlyMatches(t *testing.T) {
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("<= 0.9.11", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):lib/vncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-	}
-	vp := mock.VulnerabilityProvider(nvdVuln)
+// === fixed-version → distro-fixed ignore (no match) ===
 
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
+func TestMatcherApk_FixedVersionProducesIgnore_Alpine(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("openssl-alpine-fixed")
+			p := dbtest.NewPackage("openssl", "3.1.4-r5", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.Alpine318).
+				Build()
 
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.9",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:lib/vncserver:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	expected := []match.Match{
-		{
-
-			Vulnerability: nvdVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.CPEMatch,
-					Confidence: 0.9,
-					SearchedBy: match.CPEParameters{
-						CPEs:      []string{"cpe:2.3:a:*:lib\\/vncserver:0.9.9:*:*:*:*:*:*:*"},
-						Namespace: "nvd:cpe",
-						Package: match.PackageParameter{
-							Name:    "libvncserver",
-							Version: "0.9.9",
-						},
-					},
-					Found: match.CPEResult{
-						// use .String() for proper escaping
-						CPEs:              []string{nvdVuln.CPEs[0].Attributes.String()},
-						VersionConstraint: nvdVuln.Constraint.String(),
-						VulnerabilityID:   "CVE-2020-1",
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).Ignores().
+				SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2024-0727").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
-func TestNvdOnlyMatches_FixInNvd(t *testing.T) {
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("< 0.9.11", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):libvncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-		Fix: vulnerability.Fix{
-			Versions: []string{"0.9.12"},
-			State:    vulnerability.FixStateFixed,
-		},
-	}
-	vp := mock.VulnerabilityProvider(nvdVuln)
+func TestMatcherApk_FixedVersionProducesIgnore_Wolfi(t *testing.T) {
+	dbtest.DBs(t, "wolfi-rolling").
+		SelectOnly("wolfi:rolling/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("openssl-wolfi-fixed")
+			p := dbtest.NewPackage("openssl", "3.2.1-r0", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.WolfiRolling).
+				Build()
 
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.9",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:libvncserver:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	vulnFound := nvdVuln
-	// Important: for alpine matcher, fix version can come from secDB but _not_ from
-	// NVD data.
-	vulnFound.Fix = vulnerability.Fix{State: vulnerability.FixStateUnknown}
-
-	expected := []match.Match{
-		{
-			Vulnerability: vulnFound,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.CPEMatch,
-					Confidence: 0.9,
-					SearchedBy: match.CPEParameters{
-						CPEs:      []string{"cpe:2.3:a:*:libvncserver:0.9.9:*:*:*:*:*:*:*"},
-						Namespace: "nvd:cpe",
-						Package: match.PackageParameter{
-							Name:    "libvncserver",
-							Version: "0.9.9",
-						},
-					},
-					Found: match.CPEResult{
-						CPEs:              []string{vulnFound.CPEs[0].Attributes.String()},
-						VersionConstraint: vulnFound.Constraint.String(),
-						VulnerabilityID:   "CVE-2020-1",
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).Ignores().
+				SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2024-0727").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
-func TestNvdMatchesProperVersionFiltering(t *testing.T) {
-	nvdVulnMatch := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("<= 0.9.11", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):libvncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-	}
-	nvdVulnNoMatch := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-2",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("< 0.9.11", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):libvncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-	}
-	vp := mock.VulnerabilityProvider(nvdVulnMatch, nvdVulnNoMatch)
+// TestMatcherApk_FixedVersionInUpstreamProducesIgnore verifies that when a
+// binary apk package's upstream is at or past the secdb fix, the
+// distro-fixed ignore is emitted against the binary package's ID
+// (catalogPkg) - not the synthetic upstream - so consumers can suppress
+// language-ecosystem matches that overlap the binary by file ownership.
+func TestMatcherApk_FixedVersionInUpstreamProducesIgnore(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("libssl3-fixed")
+			p := dbtest.NewPackage("libssl3", "3.1.4-r5", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.Alpine318).
+				WithUpstream("openssl", "3.1.4-r5").
+				Build()
 
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.11-r10",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:libvncserver:0.9.11:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	expected := []match.Match{
-		{
-			Vulnerability: nvdVulnMatch,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.CPEMatch,
-					Confidence: 0.9,
-					SearchedBy: match.CPEParameters{
-						CPEs:      []string{"cpe:2.3:a:*:libvncserver:0.9.11:*:*:*:*:*:*:*"},
-						Namespace: "nvd:cpe",
-						Package: match.PackageParameter{
-							Name:    "libvncserver",
-							Version: "0.9.11-r10",
-						},
-					},
-					Found: match.CPEResult{
-						CPEs:              []string{nvdVulnMatch.CPEs[0].Attributes.String()},
-						VersionConstraint: nvdVulnMatch.Constraint.String(),
-						VulnerabilityID:   "CVE-2020-1",
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).Ignores().
+				SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2024-0727").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
-func TestNvdMatchesWithSecDBFix(t *testing.T) {
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("> 0.9.0, < 0.10.0", version.UnknownFormat), // note: this is not normal NVD configuration, but has the desired effect of a "wide net" for vulnerable indication
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):libvncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-	}
+// === NAK → distro-nak + distro-fixed ignores ===
 
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("< 0.9.11", version.ApkFormat), // note: this does NOT include 0.9.11, so NVD and SecDB mismatch here... secDB should trump in this case
-	}
+// TestMatcherApk_NakProducesIgnore_Alpine verifies the NAK path: alpine
+// CVE-2019-6470 lists bind with Version="0", which the v6 OS transformer
+// turns into a "< 0" ApkFormat constraint. The matcher emits two ignores
+// per NAK - one distro-fixed via the shared MatchPackageByDistro
+// fixed/unaffected ownership path, and one apk-specific distro-nak
+// via findNaksForPackage. Both point at the same package + CVE.
+func TestMatcherApk_NakProducesIgnore_Alpine(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2019-6470").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("bind-pkg")
+			p := dbtest.NewPackage("bind", "9.16.0-r0", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.Alpine318).
+				Build()
 
-	vp := mock.VulnerabilityProvider(nvdVuln, secDbVuln)
-
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.11",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:libvncserver:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	var expected []match.Match
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			ignores := db.Match(t, &matcher, p).Ignores()
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroNAK, "CVE-2019-6470").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2019-6470").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
-func TestNvdMatchesNoConstraintWithSecDBFix(t *testing.T) {
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("", version.UnknownFormat), // note: empty value indicates that all versions are vulnerable
-		CPEs: []cpe.CPE{
-			cpe.Must(`cpe:2.3:a:lib_vnc_project-\(server\):libvncserver:*:*:*:*:*:*:*:*`, ""),
-		},
-	}
+func TestMatcherApk_NakProducesIgnore_Wolfi(t *testing.T) {
+	// wolfi CVE-2024-47535 lists akhq (and others) with Version="0".
+	dbtest.DBs(t, "wolfi-rolling").
+		SelectOnly("wolfi:rolling/CVE-2024-47535").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("akhq-pkg")
+			p := dbtest.NewPackage("akhq", "0.25.0-r0", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.WolfiRolling).
+				Build()
 
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "libvncserver",
-		Constraint:  version.MustGetConstraint("< 0.9.11", version.ApkFormat),
-	}
-
-	vp := mock.VulnerabilityProvider(nvdVuln, secDbVuln)
-
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "libvncserver",
-		Version: "0.9.11",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:*:libvncserver:0.9.9:*:*:*:*:*:*:*", ""),
-		},
-	}
-
-	var expected []match.Match
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			ignores := db.Match(t, &matcher, p).Ignores()
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroNAK, "CVE-2024-47535").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2024-47535").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
-func TestNVDMatchCanceledByOriginPackageInSecDB(t *testing.T) {
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2015-3211",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "php-fpm",
-		Constraint:  version.MustGetConstraint("", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:php-fpm:php-fpm:-:*:*:*:*:*:*:*", ""),
-		},
-	}
-	secDBVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2015-3211",
-			Namespace: "wolfi:distro:wolfi:rolling",
-		},
-		PackageName: "php-8.3",
-		Constraint:  version.MustGetConstraint("< 0", version.ApkFormat),
-	}
-	vp := mock.VulnerabilityProvider(nvdVuln, secDBVuln)
+// TestMatcherApk_NakInUpstreamProducesIgnore verifies that when the secdb
+// NAK applies to an upstream/origin package, the ignores still point at
+// the binary package's ID. The bind alpine 3.18 NAK applies to source
+// "bind"; a binary named bind-tools would be treated as a subpackage.
+func TestMatcherApk_NakInUpstreamProducesIgnore(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2019-6470").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("bind-tools-pkg")
+			p := dbtest.NewPackage("bind-tools", "9.16.0-r0", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.Alpine318).
+				WithUpstream("bind", "").
+				Build()
 
-	m := Matcher{}
-	d := distro.New(distro.Wolfi, "", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "php-8.3-fpm", // the package will not match anything
-		Version: "8.3.11-r0",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:php-fpm:php-fpm:8.3.11-r0:*:*:*:*:*:*:*", ""),
-		},
-		Upstreams: []pkg.UpstreamPackage{
-			{
-				Name:    "php-8.3", // this upstream should match
-				Version: "8.3.11-r0",
-			},
-		},
-	}
-
-	var expected []match.Match
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			ignores := db.Match(t, &matcher, p).Ignores()
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroNAK, "CVE-2019-6470").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2019-6470").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
-func TestDistroMatchBySourceIndirection(t *testing.T) {
+// TestMatcherApk_UnknownPackageProducesNothing verifies that a package the
+// secdb has no record of (and which has no CPEs to match NVD) yields
+// neither matches nor ignores - the search-miss case the language-ignore
+// chain relies on so that GHSAs aren't suppressed for packages the distro
+// doesn't ship.
+func TestMatcherApk_UnknownPackageProducesNothing(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			p := dbtest.NewPackage("something-obscure", "1.0.0-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.Alpine318).
+				Build()
 
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			// ID doesn't match - this is the key for comparison in the matcher
-			ID:        "CVE-2020-2",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "musl",
-		Constraint:  version.MustGetConstraint("<= 1.3.3-r0", version.ApkFormat),
-	}
-	vp := mock.VulnerabilityProvider(secDbVuln)
-
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "musl-utils",
-		Version: "1.3.2-r0",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		Upstreams: []pkg.UpstreamPackage{
-			{
-				Name: "musl",
-			},
-		},
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:musl-utils:musl-utils:*:*:*:*:*:*:*:*", cpe.GeneratedSource),
-		},
-	}
-
-	expected := []match.Match{
-		{
-
-			Vulnerability: secDbVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.ExactIndirectMatch,
-					Confidence: 1.0,
-					SearchedBy: match.DistroParameters{
-						Distro: match.DistroIdentification{
-							Type:    d.Type.String(),
-							Version: d.Version,
-						},
-						Package: match.PackageParameter{
-							Name:    "musl",
-							Version: p.Version,
-						},
-						Namespace: "secdb:distro:alpine:3.12",
-					},
-					Found: match.DistroResult{
-						VulnerabilityID:   "CVE-2020-2",
-						VersionConstraint: secDbVuln.Constraint.String(),
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).IsEmpty()
+		})
 }
 
-func TestSecDBMatchesStillCountedWithCpeErrors(t *testing.T) {
-	// this should match the test package
-	// the test package will have no CPE causing an error,
-	// but the error should not cause the secDB matches to fail
-	secDbVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-2",
-			Namespace: "secdb:distro:alpine:3.12",
-		},
-		PackageName: "musl",
-		Constraint:  version.MustGetConstraint("<= 1.3.3-r0", version.ApkFormat),
-	}
+// === NVD CPE matching alongside secdb ===
 
-	vp := mock.VulnerabilityProvider(secDbVuln)
+// TestMatcherApk_NvdDedupedBySecdb verifies that when a CVE is present in
+// both secdb and NVD and both records consider the package vulnerable, only
+// the secdb record is returned - the apk matcher trusts secdb as
+// authoritative and drops the duplicate NVD CPE finding.
+func TestMatcherApk_NvdDedupedBySecdb(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727", "CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			p := dbtest.NewPackage("openssl", "3.1.4-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.Alpine318).
+				WithCPE("cpe:2.3:a:openssl:openssl:3.1.4-r0:*:*:*:*:*:*:*").
+				Build()
 
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "musl-utils",
-		Version: "1.3.2-r0",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		Upstreams: []pkg.UpstreamPackage{
-			{
-				Name: "musl",
-			},
-		},
-		CPEs: []cpe.CPE{},
-	}
-
-	expected := []match.Match{
-		{
-
-			Vulnerability: secDbVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.ExactIndirectMatch,
-					Confidence: 1.0,
-					SearchedBy: match.DistroParameters{
-						Distro: match.DistroIdentification{
-							Type:    d.Type.String(),
-							Version: d.Version,
-						},
-						Package: match.PackageParameter{
-							Name:    "musl",
-							Version: p.Version,
-						},
-						Namespace: "secdb:distro:alpine:3.12",
-					},
-					Found: match.DistroResult{
-						VulnerabilityID:   "CVE-2020-2",
-						VersionConstraint: secDbVuln.Constraint.String(),
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactDirectMatch).
+				AsDistroSearch()
+		})
 }
 
-func TestNVDMatchBySourceIndirection(t *testing.T) {
-	nvdVuln := vulnerability.Vulnerability{
-		Reference: vulnerability.Reference{
-			ID:        "CVE-2020-1",
-			Namespace: "nvd:cpe",
-		},
-		PackageName: "musl",
-		Constraint:  version.MustGetConstraint("<= 1.3.3-r0", version.UnknownFormat),
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:musl:musl:*:*:*:*:*:*:*:*", ""),
-		},
-	}
-	vp := mock.VulnerabilityProvider(nvdVuln)
+// TestMatcherApk_NvdDroppedWhenSecdbHasFix verifies that when secdb knows
+// about a CVE and considers the package fixed, the NVD CPE record is
+// dropped even if NVD still considers the upstream version vulnerable. The
+// only output is a distro-fixed ignore from the secdb path.
+func TestMatcherApk_NvdDroppedWhenSecdbHasFix(t *testing.T) {
+	// alpine fix: openssl 3.1.4-r5. NVD CVE-2024-0727 lists openssl in
+	// [3.1.0, 3.1.5), so 3.1.4 still matches the NVD CPE range - this is
+	// exactly the case the secdb-trumps-NVD logic exists to suppress.
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727", "CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("openssl-fixed-with-cpe")
+			p := dbtest.NewPackage("openssl", "3.1.4-r5", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.Alpine318).
+				WithCPE("cpe:2.3:a:openssl:openssl:3.1.4-r5:*:*:*:*:*:*:*").
+				Build()
 
-	m := Matcher{}
-	d := distro.New(distro.Alpine, "3.12.0", "")
-
-	p := pkg.Package{
-		ID:      pkg.ID(uuid.NewString()),
-		Name:    "musl-utils",
-		Version: "1.3.2-r0",
-		Type:    syftPkg.ApkPkg,
-		Distro:  d,
-		CPEs: []cpe.CPE{
-			cpe.Must("cpe:2.3:a:musl-utils:musl-utils:*:*:*:*:*:*:*:*", ""),
-			cpe.Must("cpe:2.3:a:musl-utils:musl-utils:*:*:*:*:*:*:*:*", ""),
-		},
-		Upstreams: []pkg.UpstreamPackage{
-			{
-				Name: "musl",
-			},
-		},
-	}
-
-	expected := []match.Match{
-		{
-			Vulnerability: nvdVuln,
-			Package:       p,
-			Details: []match.Detail{
-				{
-					Type:       match.CPEMatch,
-					Confidence: 0.9,
-					SearchedBy: match.CPEParameters{
-						CPEs:      []string{"cpe:2.3:a:musl:musl:1.3.2-r0:*:*:*:*:*:*:*"},
-						Namespace: "nvd:cpe",
-						Package: match.PackageParameter{
-							Name:    "musl",
-							Version: "1.3.2-r0",
-						},
-					},
-					Found: match.CPEResult{
-						CPEs:              []string{nvdVuln.CPEs[0].Attributes.String()},
-						VersionConstraint: nvdVuln.Constraint.String(),
-						VulnerabilityID:   "CVE-2020-1",
-					},
-					Matcher: match.ApkMatcher,
-				},
-			},
-		},
-	}
-
-	actual, _, err := m.Match(vp, p)
-	assert.NoError(t, err)
-
-	assertMatches(t, expected, actual)
+			db.Match(t, &matcher, p).Ignores().
+				SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2024-0727").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
-func assertMatches(t *testing.T, expected, actual []match.Match) {
-	t.Helper()
-	var opts = []cmp.Option{
-		cmpopts.IgnoreFields(vulnerability.Vulnerability{}, "Constraint"),
-		cmpopts.IgnoreFields(pkg.Package{}, "Locations"),
-		cmpopts.IgnoreUnexported(distro.Distro{}),
-	}
+// TestMatcherApk_NvdMatchWhenSecdbHasNoCveEntry verifies the NVD-only path
+// of cpeMatchesWithoutSecDBFixes: CVE-2014-0224 affects openssl in
+// [1.0.1, 1.0.1h) per NVD, but alpine 3.18 secdb doesn't carry a record
+// for it. The matcher returns it as a CPEMatch alongside the unrelated
+// secdb CVE-2024-0727 finding for the same package.
+func TestMatcherApk_NvdMatchWhenSecdbHasNoCveEntry(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727", "CVE-2014-0224", "CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("openssl-1.0.1f")
+			p := dbtest.NewPackage("openssl", "1.0.1f-r0", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.Alpine318).
+				WithCPE("cpe:2.3:a:openssl:openssl:1.0.1f-r0:*:*:*:*:*:*:*").
+				Build()
 
-	if diff := cmp.Diff(expected, actual, opts...); diff != "" {
-		t.Errorf("mismatch (-want +got):\n%s", diff)
-	}
+			findings := db.Match(t, &matcher, p)
+			// secdb path supplies CVE-2024-0727
+			findings.SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactDirectMatch).
+				AsDistroSearch()
+			// NVD-only path supplies CVE-2014-0224
+			findings.SelectMatch("CVE-2014-0224").
+				SelectDetailByType(match.CPEMatch).
+				AsCPESearch()
+
+			// CVE-2024-0727 is in NVD too; v1.0.1f is outside any of NVD's
+			// vulnerable ranges for that CVE, so MatchPackageByCPEs flags
+			// it as "CPE not vulnerable" (separate from the secdb match).
+			findings.Ignores().
+				SelectRelatedPackageIgnore(reasonCPENotVulnerable, "CVE-2024-0727").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
 }
 
+// TestMatcherApk_NvdFixDroppedWhenNoSecdbEntry verifies the apk-specific
+// behavior of stripping NVD's fix info on NVD-only matches: the matcher
+// treats the secdb as the authoritative source of fix versions for apk
+// packages, so when secdb has no record of a CVE it sets the NVD record's
+// Fix to vulnerability.FixStateUnknown rather than letting NVD's
+// upstream-only fix version leak through.
+func TestMatcherApk_NvdFixDroppedWhenNoSecdbEntry(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("CVE-2014-0224").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			p := dbtest.NewPackage("openssl", "1.0.1f-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.Alpine318).
+				WithCPE("cpe:2.3:a:openssl:openssl:1.0.1f-r0:*:*:*:*:*:*:*").
+				Build()
+
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2014-0224").
+				HasFix(vulnerability.FixStateUnknown).
+				SelectDetailByType(match.CPEMatch).
+				AsCPESearch()
+		})
+}
+
+// TestMatcherApk_NvdMatchAppliesVersionFiltering verifies that NVD CVEs
+// outside the package's vulnerable range are filtered out:
+// CVE-2014-0224's openssl ranges max at 1.0.1h, so an openssl 3.1.4-r0
+// package never matches CVE-2014-0224 even though both share a CPE
+// product. The fixture has CVE-2014-0224 but the matcher should not
+// surface it for this version.
+func TestMatcherApk_NvdMatchAppliesVersionFiltering(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("3.18/CVE-2024-0727", "CVE-2014-0224", "CVE-2024-0727").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("openssl-3.1.4")
+			p := dbtest.NewPackage("openssl", "3.1.4-r0", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.Alpine318).
+				WithCPE("cpe:2.3:a:openssl:openssl:3.1.4-r0:*:*:*:*:*:*:*").
+				Build()
+
+			findings := db.Match(t, &matcher, p)
+			findings.SelectMatch("CVE-2024-0727").
+				SelectDetailByType(match.ExactDirectMatch).
+				AsDistroSearch()
+
+			// CVE-2014-0224 is fetched by CPE but its versionEndExcluding
+			// is 1.0.1h; openssl 3.1.4 is past that, so the version filter
+			// drops it - which surfaces as a "CPE not vulnerable" ignore.
+			findings.Ignores().
+				SelectRelatedPackageIgnore(reasonCPENotVulnerable, "CVE-2014-0224").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
+}
+
+// TestMatcherApk_NvdMatchBySourceIndirection verifies that NVD CPE matches
+// can reach a binary apk package only via its upstream/origin package
+// when the binary's own CPE product differs from the upstream's. The
+// binary libssl3's CPE (cpe:2.3:a:libssl3:libssl3:...) does not match
+// NVD's openssl record, but pkg.UpstreamPackages rewrites the CPE -
+// substituting the binary name for the upstream name - so the synthesized
+// upstream CPE (cpe:2.3:a:openssl:openssl:...) does match. This ensures
+// only the indirect match path produces the finding.
+func TestMatcherApk_NvdMatchBySourceIndirection(t *testing.T) {
+	dbtest.DBs(t, "alpine318").
+		SelectOnly("CVE-2014-0224").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			p := dbtest.NewPackage("libssl3", "1.0.1f-r0", syftPkg.ApkPkg).
+				WithDistro(dbtest.Alpine318).
+				WithUpstream("openssl", "").
+				WithCPE("cpe:2.3:a:libssl3:libssl3:1.0.1f-r0:*:*:*:*:*:*:*").
+				Build()
+
+			db.Match(t, &matcher, p).
+				SelectMatch("CVE-2014-0224").
+				SelectDetailByType(match.CPEMatch).
+				AsCPESearch()
+		})
+}
+
+// TestMatcherApk_NvdCanceledByUpstreamSecdbNak verifies that an upstream
+// secdb NAK suppresses an NVD CPE match for the same CVE:
+// cpeMatchesWithoutSecDBFixes pulls upstream secdb entries when checking
+// the secdb-says-not-vulnerable filter, so a wolfi NAK on the akhq origin
+// (CVE-2024-47535 with Version="0") cancels the NVD CPE match for the
+// netty-common CPE on a downstream binary package.
+func TestMatcherApk_NvdCanceledByUpstreamSecdbNak(t *testing.T) {
+	dbtest.DBs(t, "wolfi-rolling").
+		SelectOnly("wolfi:rolling/CVE-2024-47535", "CVE-2024-47535").
+		Run(func(t *testing.T, db *dbtest.DB) {
+			matcher := Matcher{}
+			pkgID := pkg.ID("akhq-bin")
+			p := dbtest.NewPackage("akhq-bin", "0.25.0-r0", syftPkg.ApkPkg).
+				WithID(pkgID).
+				WithDistro(dbtest.WolfiRolling).
+				WithUpstream("akhq", "").
+				WithCPE("cpe:2.3:a:io.netty:netty-common:0.25.0-r0:*:*:*:*:maven:*:*").
+				Build()
+
+			findings := db.Match(t, &matcher, p)
+
+			// no NVD match emerges - the upstream NAK on akhq cancels the
+			// netty-common CPE finding before deduplicateMatches runs.
+			findings.DoesNotHaveAnyVulnerabilities("CVE-2024-47535")
+
+			// the upstream NAK still produces both apk-NAK and
+			// distro-fixed ignores keyed to the catalog package.
+			ignores := findings.Ignores()
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroNAK, "CVE-2024-47535").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+			ignores.SelectRelatedPackageIgnore(ignorereasons.DistroFixed, "CVE-2024-47535").
+				ForPackage(pkgID).
+				WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+		})
+}
+
+// === upstream (NVD) suppression by alias ===
+//
+// The chainguard-rolling fixture pairs a distro advisory with its upstream NVD
+// record so the alias-aware reconciliation can be exercised end to end:
+//   - distro:  CGA-22hv-wp9q-4779 (Chainguard langfuse-3-worker, arch x86_64,
+//              fixed 3.153.0-r0) carries upstream aliases CVE-2026-24398 and
+//              GHSA-r354-f388-2fhh.
+//   - NVD:     CVE-2026-24398 flags cpe:2.3:a:langfuse:langfuse in [3.0.0, 4.0.0).
+//
+// Because the distro feed is authoritative and the two records share identity
+// via the CGA's alias set, the NVD CVE-2026-24398 CPE finding must never surface
+// on its own - it is either dropped (distro considers it fixed) or deduped into
+// the authoritative distro match (distro considers it vulnerable).
+
+// TestMatcherApk_UpstreamCveSuppressedByFixedAlias langfuse-3-worker is
+// past the CGA fix (3.153.1-r0 > 3.153.0-r0), so the distro feed reports
+// the vulnerability fixed. NVD still flags CVE-2026-24398 for the langfuse
+// CPE at this version, since CVE-2026-24398 is an alias of the fixed CGA,
+// it is neither "not in feed" nor "still vulnerable" and gets dropped.
+func TestMatcherApk_UpstreamCveSuppressedByFixedAlias(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		pkgID := pkg.ID("langfuse-past-fix-with-cpe")
+		p := dbtest.NewPackage("langfuse-3-worker", "3.153.1-r0", syftPkg.ApkPkg).
+			WithID(pkgID).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("x86_64").
+			WithCPE("cpe:2.3:a:langfuse:langfuse:3.153.1-r0:*:*:*:*:*:*:*").
+			Build()
+
+		findings := db.Match(t, &matcher, p)
+
+		// the NVD CVE alias is suppressed by the fixed CGA distro record - it
+		// must not surface as its own match.
+		findings.DoesNotHaveAnyVulnerabilities("CVE-2026-24398")
+
+		// the distro fixed path still emits one distro-fixed ignore per
+		// identifier (the CGA id plus its CVE/GHSA aliases).
+		findings.Ignores().
+			SelectRelatedPackageIgnores(ignorereasons.DistroFixed,
+				"CGA-22hv-wp9q-4779",
+				"CVE-2026-24398",
+				"GHSA-r354-f388-2fhh").
+			ForPackage(pkgID).
+			WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+	})
+}
+
+// TestMatcherApk_UpstreamCveDedupedByVulnerableAlias langfuse-3-worker is below the CGA fix
+// (3.152.0-r0 < 3.153.0-r0), so both the distro CGA record and the NVD CVE-2026-24398 CPE
+// record consider it vulnerable. The two share identity via the CGA's alias set, so the
+// upstream NVD finding is deduped into the authoritative distro match rather than surfacing
+// separately - only the CGA distro match is returned.
+func TestMatcherApk_UpstreamCveDedupedByVulnerableAlias(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		p := dbtest.NewPackage("langfuse-3-worker", "3.152.0-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("x86_64").
+			WithCPE("cpe:2.3:a:langfuse:langfuse:3.152.0-r0:*:*:*:*:*:*:*").
+			Build()
+
+		findings := db.Match(t, &matcher, p)
+
+		// only the authoritative distro record surfaces...
+		findings.SelectMatch("CGA-22hv-wp9q-4779").
+			SelectDetailByType(match.ExactDirectMatch).
+			AsDistroSearch()
+
+		// ...the aliased upstream NVD CVE is deduped away.
+		findings.DoesNotHaveAnyVulnerabilities("CVE-2026-24398")
+	})
+}
+
+// TestMatcherApk_UpstreamCveDedupedByIntroducedZeroAlias covers an unfixed distro advisory:
+// CGA-n0f1-x000-0000 lists grafana with a single "introduced: 0" event and no fixed event, so the
+// distro feed considers grafana vulnerable at every version (a package handle with no ranges is
+// implicitly vulnerable to all versions). NVD flags the aliased CVE-2026-30000 for the grafana CPE
+// at this version, but the two share identity via the CGA's alias set, so the upstream NVD finding
+// is deduped into the authoritative distro match - only the CGA distro match is returned.
+func TestMatcherApk_UpstreamCveDedupedByIntroducedZeroAlias(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		pkgID := pkg.ID("grafana-introduced-zero")
+		p := dbtest.NewPackage("grafana", "9.0.0-r0", syftPkg.ApkPkg).
+			WithID(pkgID).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("x86_64").
+			WithCPE("cpe:2.3:a:grafana:grafana:9.0.0-r0:*:*:*:*:*:*:*").
+			Build()
+
+		findings := db.Match(t, &matcher, p)
+
+		// the unfixed distro advisory surfaces...
+		findings.SelectMatch("CGA-n0f1-x000-0000").
+			SelectDetailByType(match.ExactDirectMatch).
+			AsDistroSearch()
+
+		// ...the aliased upstream NVD CVE is deduped away.
+		findings.DoesNotHaveAnyVulnerabilities("CVE-2026-30000")
+
+		// the ranges-less advisory must NOT be treated as an apk NAK: it is affected at every
+		// version, not "not affected". The "< 0" NAK filter no longer matches a record that
+		// carries no "< 0" constraint, so no distro-nak ignores are emitted.
+		findings.Ignores().IsEmpty()
+	})
+}
+
+// TestMatcherApk_SelfUpstreamIsRecordedAsIndirect covers an apk whose origin package is itself, which
+// is common (an apk that is its own origin still lists one). The distro feed is searched twice for
+// it, once directly and once as its own upstream, and the upstream pass must record what it finds as
+// an indirect match.
+//
+// The match-type is otherwise derived by comparing the searched name against the cataloged one, and
+// here they are equal, so nothing downstream can tell the two passes apart. The upstream pass has to
+// say so explicitly, which is why the package override and the detail-type rewrite belong together.
+func TestMatcherApk_SelfUpstreamIsRecordedAsIndirect(t *testing.T) {
+	dbtest.DBs(t, "alpine318").SelectOnly("3.18/CVE-2024-0727").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		p := dbtest.NewPackage("openssl", "3.1.4-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.Alpine318).
+			WithUpstream("openssl", "3.1.4-r0").
+			Build()
+
+		finding := db.Match(t, &matcher, p).SelectMatch("CVE-2024-0727")
+
+		// the direct search finds it...
+		finding.SelectDetailByType(match.ExactDirectMatch).AsDistroSearch()
+		// ...and so does the pass over its own upstream, which must not look direct as well
+		finding.SelectDetailByType(match.ExactIndirectMatch).AsDistroSearch()
+	})
+}
+
+// TestMatcherApk_NoDistroKeepsNvdFix covers an apk package with no distro, which happens for
+// SBOM-only input. apk clears NVD-inferred fix data because the distro feed is the authority on when
+// an apk ships (#2162) -- but with no distro there is no feed and no authority to defer to, so NVD's
+// fix is the only information available and dropping it just loses data.
+func TestMatcherApk_NoDistroKeepsNvdFix(t *testing.T) {
+	dbtest.DBs(t, "alpine318").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		pkgID := pkg.ID("openssl-no-distro")
+		p := dbtest.NewPackage("openssl", "1.0.1f-r0", syftPkg.ApkPkg).
+			WithID(pkgID).
+			// no distro, deliberately
+			WithCPE("cpe:2.3:a:openssl:openssl:1.0.1f-r0:*:*:*:*:*:*:*").
+			Build()
+
+		findings := db.Match(t, &matcher, p)
+
+		finding := findings.SelectMatch("CVE-2014-0224")
+		finding.SelectDetailByType(match.CPEMatch).AsCPESearch()
+		finding.HasFix(vulnerability.FixStateFixed, "0.9.8za", "1.0.0m", "1.0.1h")
+
+		// this version is outside NVD's range for CVE-2024-0727, so the CPE search reports it as an
+		// ignore rather than a match
+		findings.Ignores().
+			SelectRelatedPackageIgnore(reasonCPENotVulnerable, "CVE-2024-0727").
+			ForPackage(pkgID).
+			WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+	})
+}
+
+// === architecture qualifier filtering (CG OSV records) ===
+//
+// The chainguard-rolling fixture has CGA-22hv-wp9q-4779, which emits
+// AffectedPackageHandles with an Architecture qualifier per row:
+//   - langfuse-3-worker      / Chainguard / arch=x86_64   / fixed:3.153.0-r0
+//   - langfuse-fips-3-worker / Chainguard / arch=x86_64   / fixed:3.152.0-r0
+//   - langfuse-3-worker      / Wolfi      / arch=aarch64  / fixed:3.153.0-r0
+//
+// These tests pin down architectureQualifier.Satisfied at the matcher level:
+// the qualifier filters vuln entries whose arch disagrees with the scanned
+// package, and is inert (passthrough) when the package has no arch. The
+// existing wolfi/alpine secdb tests don't exercise this path because the OS
+// transformer never emits Architecture qualifiers.
+
+// TestMatcherApk_ArchFilter_MatchWhenArchAgrees confirms the happy path:
+// arch on the package equals the qualifier's arch, so Satisfied returns
+// true and the vuln surfaces as a normal distro match.
+func TestMatcherApk_ArchFilter_MatchWhenArchAgrees(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		// fix is 3.153.0-r0; 3.152.0-r0 is below, so the apk constraint matches
+		p := dbtest.NewPackage("langfuse-3-worker", "3.152.0-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("x86_64").
+			Build()
+
+		// package p is affected by this vulnerability on this architecture
+		db.Match(t, &matcher, p).
+			SelectMatch("CGA-22hv-wp9q-4779").
+			SelectDetailByType(match.ExactDirectMatch).
+			AsDistroSearch()
+	})
+}
+
+// TestMatcherApk_ArchFilter_IgnoreWhenArchAgrees is the pair of
+// MatchWhenArchAgrees: same package, same arch, but a version past the
+// fix. The arch qualifier still passes so the fix path runs and emits
+// one distro-fixed ignore per identifier (CGA id + aliases).
+// Cross-checks that arch filtering doesn't short-circuit the
+// fixed-version ignore emission.
+func TestMatcherApk_ArchFilter_IgnoreWhenArchAgrees(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		// fix is 3.153.0-r0; 3.153.1-r0 is over the fix, so the matcher emits
+		// no match but does emit one distro-fixed ignore per identifier
+		// (the CGA id plus its CVE/GHSA aliases) so consumers can suppress
+		// language-ecosystem findings that overlap by file ownership.
+		pkgID := pkg.ID("langfuse-past-fix")
+		p := dbtest.NewPackage("langfuse-3-worker", "3.153.1-r0", syftPkg.ApkPkg).
+			WithID(pkgID).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("x86_64").
+			Build()
+
+		// vulnerability fixed this pkg-version for this architecture
+		db.Match(t, &matcher, p).Ignores().
+			SelectRelatedPackageIgnores(ignorereasons.DistroFixed,
+				"CGA-22hv-wp9q-4779",
+				"CVE-2026-24398",
+				"GHSA-r354-f388-2fhh").
+			ForPackage(pkgID).
+			WithRelationshipType(artifact.OwnershipByFileOverlapRelationship)
+	})
+}
+
+// TestMatcherApk_ArchFilter_NoMatchWhenArchDisagrees is the load-bearing case:
+// the package's arch is aarch64 but the only Chainguard APH for this name has
+// arch=x86_64, so OnlyQualifiedPackages drops it before the version check ever
+// runs. No match, no ignore (the vuln is filtered before reaching the fix
+// path that would emit a distro-fixed ignore).
+func TestMatcherApk_ArchFilter_NoMatchWhenArchDisagrees(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		p := dbtest.NewPackage("langfuse-3-worker", "3.152.0-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("aarch64"). // mismatch: Chainguard APH says x86_64
+			Build()
+
+		// no records match chainguard - aarch64
+		db.Match(t, &matcher, p).IsEmpty()
+	})
+}
+
+// TestMatcherApk_NvdOnlyMatchGetsFixStripped pins the rule from #2162: grype-db infers
+// fixes from NVD end-of-range data and apk discards them, because an NVD "fix" is an
+// upstream release number and only the distro feed knows when an apk ships. Here NVD's
+// [3.0.0, 4.0.0) range for CVE-2026-24398 becomes fix 4.0.0. main (ffbca561) reports
+// this same match with fix=[] state=unknown.
+//
+// The port of that rule is faithful. main's cpeMatchesWithoutSecDBFixes had the same two
+// exits cpeDisclosures does: "no feed entry for this ID" strips, "feed says vulnerable at
+// this version" does not. What changed is identity. main keyed that lookup on the exact
+// vulnerability ID, so a CGA-keyed row could never match a CVE-keyed NVD record and every
+// NVD CVE on an OSV feed took the stripping exit. Alias-aware identity resolves the CGA to
+// this CVE, reaching the non-stripping exit for the first time.
+//
+// So the question this raises is not "what did the port break" but what that second exit
+// should mean now that "the feed knows this vulnerability" can be true by alias: #2162's
+// argument does not care which exit a record arrived on.
+func TestMatcherApk_NvdOnlyMatchGetsFixStripped(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		p := dbtest.NewPackage("langfuse-3-worker", "3.152.0-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("aarch64"). // mismatch: the Chainguard row is x86_64... we just want to test NVD-only
+			WithCPE("cpe:2.3:a:langfuse:langfuse:3.152.0-r0:*:*:*:*:*:*:*").
+			Build()
+
+		findings := db.Match(t, &matcher, p)
+
+		// no distro match: the x86_64 row does not apply to this package
+		findings.DoesNotHaveAnyVulnerabilities("CGA-22hv-wp9q-4779")
+
+		// so the NVD record is the only match, and it is the [3.0.0, 4.0.0) one
+		finding := findings.SelectMatch("CVE-2026-24398").InNamespace("nvd:cpe")
+		finding.SelectDetailByCPE(
+			"cpe:2.3:a:langfuse:langfuse:3.152.0:*:*:*:*:*:*:*",
+			">= 3.0.0, < 4.0.0 (unknown)",
+		).HasMatchType(match.CPEMatch)
+
+		// being NVD-only, its inferred fix must be stripped
+		finding.HasNoFixVersions()
+		finding.HasFix(vulnerability.FixStateUnknown)
+	})
+}
+
+// TestMatcherApk_ArchFilter_WrongArchRowMustNotSuppressNvdMatch is the arch mismatch again, but
+// with the package PAST the CGA's fix version rather than below it.
+//
+// The only Chainguard row for this name is x86_64, so on aarch64 nothing in the distro feed applies
+// and the aliased NVD CVE-2026-24398 (langfuse [3.0.0, 4.0.0), and 3.153.1 is inside it) is the only
+// thing that has an opinion. It should be reported.
+//
+// It is not. feedSet queries the feed without OnlyQualifiedPackages, so it sees the x86_64 row that
+// the distro path correctly filtered out. That row aliases this CVE, which removes it from notInFeed,
+// and the row is fixed at this version, which keeps it out of feedVulnerable and so out of
+// stillVulnerable too. The record falls out of both exits and is dropped: a finding is lost because
+// of a row for another architecture.
+func TestMatcherApk_ArchFilter_WrongArchRowMustNotSuppressNvdMatch(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		p := dbtest.NewPackage("langfuse-3-worker", "3.153.1-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.ChainguardRolling).
+			WithArchitecture("aarch64"). // the Chainguard row is x86_64, so it says nothing here
+			WithCPE("cpe:2.3:a:langfuse:langfuse:3.153.1-r0:*:*:*:*:*:*:*").
+			Build()
+
+		findings := db.Match(t, &matcher, p)
+
+		// the x86_64 row does not apply, so it must not suppress anything either
+		findings.DoesNotHaveAnyVulnerabilities("CGA-22hv-wp9q-4779")
+		findings.SelectMatch("CVE-2026-24398").
+			InNamespace("nvd:cpe").
+			SelectDetailByType(match.CPEMatch).
+			AsCPESearch()
+	})
+}
+
+// TestMatcherApk_ArchFilter_InertWhenPackageHasNoArch documents the
+// passthrough branch of Satisfied(p): if p.Arch == "" the qualifier is
+// treated as inert, preserving pre-change behavior for input paths that
+// don't populate Arch. Without this branch every existing test using
+// WithDistro-but-not-WithArchitecture would regress against arch-tagged
+// providers like chainguard.
+func TestMatcherApk_ArchFilter_InertWhenPackageHasNoArch(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		p := dbtest.NewPackage("langfuse-3-worker", "3.152.0-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.ChainguardRolling).
+			// Architecture intentionally not set.
+			Build()
+
+		// package p is affected by this vulnerability because the qualifier is inert
+		// when the package has no arch
+		db.Match(t, &matcher, p).
+			SelectMatch("CGA-22hv-wp9q-4779").
+			SelectDetailByType(match.ExactDirectMatch).
+			AsDistroSearch()
+	})
+}
+
+// TestMatcherApk_ArchFilter_WolfiArchAgrees mirrors the first test against
+// the Wolfi side of the same CGA record. Beyond exercising arch=aarch64,
+// this also confirms the per-ecosystem OS row split: the matcher must reach
+// the Wolfi APH (not the Chainguard APH) when the package's distro is Wolfi.
+func TestMatcherApk_ArchFilter_WolfiArchAgrees(t *testing.T) {
+	dbtest.DBs(t, "chainguard-rolling").Run(func(t *testing.T, db *dbtest.DB) {
+		matcher := Matcher{}
+		p := dbtest.NewPackage("langfuse-3-worker", "3.152.0-r0", syftPkg.ApkPkg).
+			WithDistro(dbtest.WolfiRolling).
+			WithArchitecture("aarch64").
+			Build()
+
+		// wolfi package p is affected by this vulnerability on this architecture
+		db.Match(t, &matcher, p).
+			SelectMatch("CGA-22hv-wp9q-4779").
+			SelectDetailByType(match.ExactDirectMatch).
+			AsDistroSearch()
+	})
+}
+
+// === pure-unit tests of apk-specific predicates (no provider involved) ===
+
+// Test_nakConstraint covers the search.ByConstraintFunc that
+// findNaksForPackage uses to pick out only the apk "< 0" sentinel
+// constraint - independent of the matcher's fixture-driven flow.
 func Test_nakConstraint(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   vulnerability.Vulnerability
-		wantErr require.ErrorAssertionFunc
 		matches bool
 	}{
 		{
@@ -914,12 +860,8 @@ func Test_nakConstraint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.wantErr == nil {
-				tt.wantErr = require.NoError
-			}
-
 			matches, _, err := nakConstraint.MatchesVulnerability(tt.input)
-			tt.wantErr(t, err)
+			require.NoError(t, err)
 			require.Equal(t, tt.matches, matches)
 		})
 	}

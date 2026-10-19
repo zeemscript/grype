@@ -1,4 +1,9 @@
 version: "2"
+run:
+  # keep in sync with buildTags in .make/main.go
+  build-tags:
+    - containers_image_openpgp
+    - exclude_graphdriver_btrfs
 linters:
     # inverted configuration with `enable-all` and `disable` is not scalable during updates of golangci-lint
   default: none
@@ -37,6 +42,12 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      # we have multiple packages in grype that might overlap with the stblib; their names reflect their purpose
+      - linters:
+          - revive
+        text: "var-naming: avoid package names that conflict"
+
     paths:
       - third_party$
       - builtin$
@@ -80,8 +91,15 @@ issues:
 
 formatters:
   enable:
+    - gci
     - gofmt
-    - goimports
+  settings:
+    gci:
+      # See https://golangci-lint.run/docs/formatters/configuration/#gci
+      sections:
+        - standard # Standard section: captures all standard packages.
+        - default  # Default section: contains all imports that could not be matched to another section type.
+        - prefix(github.com/anchore)
   exclusions:
     generated: lax
     paths:

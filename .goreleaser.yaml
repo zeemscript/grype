@@ -13,6 +13,7 @@ builds:
   - id: linux-build
     dir: ./cmd/grype
     binary: grype
+    tags: [containers_image_openpgp, exclude_graphdriver_btrfs]
     goos:
       - linux
     goarch:
@@ -91,6 +92,10 @@ homebrew_casks:
     homepage: *website
     description: *description
     license: "Apache License 2.0"
+    conflicts:
+      # claim that the previous grype formula (in the root of homebrew-grype) conflicts with the new cask
+      # see https://goreleaser.com/deprecations/#brews for more information
+      - formula: grype
 
 dockers:
   # production images...
@@ -102,6 +107,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -115,6 +121,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64/v8"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -128,6 +135,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/ppc64le"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -141,6 +149,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/s390x"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -155,6 +164,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -168,6 +178,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64/v8"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -181,6 +192,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/ppc64le"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -194,6 +206,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/s390x"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -208,6 +221,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -221,6 +235,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64/v8"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -234,6 +249,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/ppc64le"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -247,6 +263,7 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/s390x"
+      - "--provenance=false"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
@@ -339,15 +356,13 @@ docker_manifests:
       - ghcr.io/anchore/grype:{{.Tag}}-debug-ppc64le
       - ghcr.io/anchore/grype:{{.Tag}}-debug-s390x
 
+# the signature, certificate, and transparency log proof all land in a single sigstore bundle.
 signs:
   - cmd: .tool/cosign
-    signature: "${artifact}.sig"
-    certificate: "${artifact}.pem"
-    args: 
+    signature: "${artifact}.sigstore.json"
+    args:
       - "sign-blob"
-      - "--oidc-issuer=https://token.actions.githubusercontent.com"
-      - "--output-certificate=${certificate}"
-      - "--output-signature=${signature}"
+      - "--bundle=${signature}"
       - "${artifact}"
       - "--yes"
     artifacts: checksum

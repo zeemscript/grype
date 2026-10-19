@@ -40,13 +40,27 @@ func TestGolangVersion_Constraint(t *testing.T) {
 			constraint: "",
 			satisfied:  true,
 		},
+		{
+			// non-canonical advisory bound (glued-on prerelease, no "-" separator): go-redis
+			// GHSA-92cp-5422-2mw7 carries ">= 9.6.0b1, < 9.6.3"; 9.6.0 must fall inside it.
+			name:       "glued-on prerelease range bound is comparable",
+			version:    "v9.6.0",
+			constraint: ">= 9.6.0b1, < 9.6.3",
+			satisfied:  true,
+		},
+		{
+			name:       "glued-on prerelease sorts before its release",
+			version:    "v9.6.0",
+			constraint: "> 9.6.0b1",
+			satisfied:  true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := GetConstraint(tc.constraint, GolangFormat)
 			require.NoError(t, err)
-			v := NewVersion(tc.version, GolangFormat)
+			v := New(tc.version, GolangFormat)
 			sat, err := c.Satisfied(v)
 			require.NoError(t, err)
 			assert.Equal(t, tc.satisfied, sat)
@@ -206,9 +220,9 @@ func TestGolangVersion_Compare(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			version1 := NewVersion(test.version1, GolangFormat)
+			version1 := New(test.version1, GolangFormat)
 
-			version2 := NewVersion(test.version2, GolangFormat)
+			version2 := New(test.version2, GolangFormat)
 
 			result, err := version1.Compare(version2)
 			assert.NoError(t, err)
@@ -218,7 +232,7 @@ func TestGolangVersion_Compare(t *testing.T) {
 }
 
 func TestGolangVersion_Compare_NilVersion(t *testing.T) {
-	version := NewVersion("v1.2.3", GolangFormat)
+	version := New("v1.2.3", GolangFormat)
 
 	result, err := version.Compare(nil)
 	require.Error(t, err)
@@ -230,7 +244,7 @@ func TestGolangVersion_Compare_DifferentFormat(t *testing.T) {
 	golangVer, err := newGolangVersion("v1.2.3")
 	require.NoError(t, err)
 
-	semanticVer := NewVersion("1.2.3", SemanticFormat)
+	semanticVer := New("1.2.3", SemanticFormat)
 
 	result, err := golangVer.Compare(semanticVer)
 	require.NoError(t, err)
@@ -291,7 +305,7 @@ func TestGolangVersion(t *testing.T) {
 			// we can't compare it and should just return an error.
 			name:  "devel",
 			input: "(devel)",
-			wantErr: func(t require.TestingT, err error, msgAndArgs ...interface{}) {
+			wantErr: func(t require.TestingT, err error, msgAndArgs ...any) {
 				require.ErrorIs(t, err, ErrUnsupportedVersion)
 			},
 		},

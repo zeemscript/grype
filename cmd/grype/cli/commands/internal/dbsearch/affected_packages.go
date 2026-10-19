@@ -34,16 +34,16 @@ type AffectedPackageInfo struct {
 	CPE *CPE `json:"cpe,omitempty"`
 
 	// Namespace is a holdover value from the v5 DB schema that combines provider and search methods into a single value
+	//
 	// Deprecated: this field will be removed in a later version of the search schema
 	Namespace string `json:"namespace"`
 
 	// Detail is the detailed information about the affected package
-	Detail v6.AffectedPackageBlob `json:"detail"`
+	Detail v6.PackageBlob `json:"detail"`
 }
 
 // Package represents a package name within a known ecosystem, such as "python" or "golang".
 type Package struct {
-
 	// Name is the name of the package within the ecosystem
 	Name string `json:"name"`
 
@@ -63,7 +63,24 @@ func (c *CPE) String() string {
 		return ""
 	}
 
-	return v6.Cpe(*c).String()
+	formattedCPE := cpe.CPE{
+		Attributes: cpe.Attributes{
+			Part:      c.Part,
+			Vendor:    c.Vendor,
+			Product:   c.Product,
+			Version:   "*",
+			Update:    "*",
+			Edition:   c.Edition,
+			SWEdition: c.SoftwareEdition,
+			TargetSW:  c.TargetSoftware,
+			TargetHW:  c.TargetHardware,
+			Other:     c.Other,
+			Language:  c.Language,
+		},
+		Source: "",
+	}
+
+	return formattedCPE.Attributes.String()
 }
 
 type AffectedPackagesOptions struct {
@@ -73,6 +90,7 @@ type AffectedPackagesOptions struct {
 	OS                    v6.OSSpecifiers
 	AllowBroadCPEMatching bool
 	RecordLimit           int
+	FixedStates           []string
 }
 
 type affectedPackageWithDecorations struct {
@@ -102,7 +120,7 @@ func (a *affectedCPEWithDecorations) getCVEs() []string {
 func newAffectedPackageRows(affectedPkgs []affectedPackageWithDecorations, affectedCPEs []affectedCPEWithDecorations) (rows []AffectedPackage) {
 	for i := range affectedPkgs {
 		pkg := affectedPkgs[i]
-		var detail v6.AffectedPackageBlob
+		var detail v6.PackageBlob
 		if pkg.BlobValue != nil {
 			detail = *pkg.BlobValue
 		}
@@ -124,7 +142,7 @@ func newAffectedPackageRows(affectedPkgs []affectedPackageWithDecorations, affec
 	}
 
 	for _, ac := range affectedCPEs {
-		var detail v6.AffectedPackageBlob
+		var detail v6.PackageBlob
 		if ac.BlobValue != nil {
 			detail = *ac.BlobValue
 		}
@@ -167,14 +185,10 @@ func toOS(os *v6.OperatingSystem) *OperatingSystem {
 	if os == nil {
 		return nil
 	}
-	version := os.VersionNumber()
-	if version == "" {
-		version = os.Version()
-	}
 
 	return &OperatingSystem{
 		Name:    os.Name,
-		Version: version,
+		Version: os.Version(),
 	}
 }
 
@@ -182,10 +196,16 @@ func FindAffectedPackages(reader interface {
 	v6.AffectedPackageStoreReader
 	v6.AffectedCPEStoreReader
 	v6.VulnerabilityDecoratorStoreReader
-}, criteria AffectedPackagesOptions) ([]AffectedPackage, error) {
+}, criteria AffectedPackagesOptions,
+) ([]AffectedPackage, error) {
 	allAffectedPkgs, allAffectedCPEs, err := findAffectedPackages(reader, criteria)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(criteria.FixedStates) > 0 {
+		allAffectedPkgs = filterByFixedStateForPackages(allAffectedPkgs, criteria.FixedStates)
+		allAffectedCPEs = filterByFixedStateForCPEs(allAffectedCPEs, criteria.FixedStates)
 	}
 
 	return newAffectedPackageRows(allAffectedPkgs, allAffectedCPEs), nil
@@ -195,7 +215,8 @@ func findAffectedPackages(reader interface { //nolint:funlen,gocognit
 	v6.AffectedPackageStoreReader
 	v6.AffectedCPEStoreReader
 	v6.VulnerabilityDecoratorStoreReader
-}, config AffectedPackagesOptions) ([]affectedPackageWithDecorations, []affectedCPEWithDecorations, error) {
+}, config AffectedPackagesOptions,
+) ([]affectedPackageWithDecorations, []affectedCPEWithDecorations, error) {
 	var allAffectedPkgs []affectedPackageWithDecorations
 	var allAffectedCPEs []affectedCPEWithDecorations
 
@@ -228,15 +249,11 @@ func findAffectedPackages(reader interface { //nolint:funlen,gocognit
 	// ensures that all paths are handled the same way.
 	defer func() {
 		for i := range allAffectedPkgs {
-			if err := decorateVulnerabilities(reader, &allAffectedPkgs[i]); err != nil {
-				log.WithFields("error", err).Debug("unable to decorate vulnerability on affected package")
-			}
+			decorateVulnerabilities(reader, &allAffectedPkgs[i])
 		}
 
 		for i := range allAffectedCPEs {
-			if err := decorateVulnerabilities(reader, &allAffectedCPEs[i]); err != nil {
-				log.WithFields("error", err).Debug("unable to decorate vulnerability on affected CPE")
-			}
+			decorateVulnerabilities(reader, &allAffectedCPEs[i])
 		}
 	}()
 
@@ -245,7 +262,7 @@ func findAffectedPackages(reader interface { //nolint:funlen,gocognit
 
 		log.WithFields("vuln", vulnSpecs, "pkg", pkgSpec, "os", osSpecs).Debug("searching for affected packages")
 
-		affectedPkgs, err := reader.GetAffectedPackages(pkgSpec, &v6.GetAffectedPackageOptions{
+		affectedPkgs, err := reader.GetAffectedPackages(pkgSpec, &v6.GetPackageOptions{
 			PreloadOS:             true,
 			PreloadPackage:        true,
 			PreloadPackageCPEs:    false,
@@ -281,7 +298,7 @@ func findAffectedPackages(reader interface { //nolint:funlen,gocognit
 
 			log.WithFields("vuln", vulnSpecs, "cpe", cpeSpec).Debug("searching for affected packages")
 
-			affectedCPEs, err := reader.GetAffectedCPEs(searchCPE, &v6.GetAffectedCPEOptions{
+			affectedCPEs, err := reader.GetAffectedCPEs(searchCPE, &v6.GetCPEOptions{
 				PreloadCPE:            true,
 				PreloadVulnerability:  true,
 				PreloadBlob:           true,

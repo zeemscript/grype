@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/anchore/grype/grype/distro"
+	"github.com/anchore/grype/grype/internal/rootio"
 	"github.com/anchore/grype/internal/log"
 	"github.com/anchore/grype/internal/stringutil"
 	"github.com/anchore/packageurl-go"
@@ -16,6 +18,16 @@ import (
 	syftPkg "github.com/anchore/syft/syft/pkg"
 	cpes "github.com/anchore/syft/syft/pkg/cataloger/common/cpe"
 )
+
+// rootioJavaGroupID returns the Maven groupID from grype's package metadata
+// for Java packages. Used by rootio.EquivalentCPEs and rootio.IsPackage to
+// detect `io.root.*`-prefixed Java backports; "" for non-Java packages.
+func rootioJavaGroupID(p Package) string {
+	if md, ok := p.Metadata.(JavaMetadata); ok {
+		return md.PomGroupID
+	}
+	return ""
+}
 
 // the source-rpm field has something akin to "util-linux-ng-2.17.2-12.28.el6_9.2.src.rpm"
 // in which case the pattern will extract out the following values for the named capture groups:
@@ -42,8 +54,17 @@ type Package struct {
 	CPEs      []cpe.CPE    // all possible Common Platform Enumerators
 	PURL      string       // the Package URL (see https://github.com/package-url/purl-spec)
 	Upstreams []UpstreamPackage
-	Metadata  interface{} // This is NOT 1-for-1 the syft metadata! Only the select data needed for vulnerability matching
+	Metadata  any // This is NOT 1-for-1 the syft metadata! Only the select data needed for vulnerability matching
+
+	// Annotations carries provider-supplied per-package metadata; values are slices to
+	// retain multiple sources when the same package is contributed by more than one origin.
+	Annotations map[string][]string
+
+	// Related packages may be used for scanning
+	RelatedPackages map[artifact.RelationshipType][]*Package
 }
+
+type Enhancer func(out *Package, purl packageurl.PackageURL, pkg syftPkg.Package)
 
 func New(p syftPkg.Package, enhancers ...Enhancer) Package {
 	metadata, upstreams := dataFromPkg(p)
@@ -59,7 +80,7 @@ func New(p syftPkg.Package, enhancers ...Enhancer) Package {
 	}
 
 	out := Package{
-		ID:        ID(p.ID()),
+		ID:        grypeID(p),
 		Name:      p.Name,
 		Version:   p.Version,
 		Locations: p.Locations,
@@ -85,57 +106,150 @@ func New(p syftPkg.Package, enhancers ...Enhancer) Package {
 	return out
 }
 
-func FromCollection(catalog *syftPkg.Collection, config SynthesisConfig, enhancers ...Enhancer) []Package {
-	return FromPackages(catalog.Sorted(), config, enhancers...)
+func FromCollection(catalog *syftPkg.Collection, relationships []artifact.Relationship, config SynthesisConfig, enhancers ...Enhancer) []*Package {
+	return FromPackages(catalog.Sorted(), relationships, config, enhancers...)
 }
 
-func FromPackages(syftpkgs []syftPkg.Package, config SynthesisConfig, enhancers ...Enhancer) []Package {
-	var pkgs []Package
-	for _, p := range syftpkgs {
+// FromPackages creates grype packages from syft packages, including relevant relationship mappings
+//
+//nolint:gocognit,funlen
+func FromPackages(syftPkgs []syftPkg.Package, relationships []artifact.Relationship, config SynthesisConfig, enhancers ...Enhancer) []*Package {
+	pkgs := make([]*Package, 0, len(syftPkgs))
+
+	// if the user provided a distro explicitly, then use that over any distro that may be inferred from a package url
+	enhancers = append([]Enhancer{applyDistroOverride(config.Distro.Override)}, enhancers...)
+
+	pkgByID := make(map[ID]*Package)
+	ownedLocations := map[string][]*Package{}
+
+	for _, p := range syftPkgs {
 		if len(p.CPEs) == 0 {
-			// For SPDX (or any format, really) we may have no CPEs
+			// for SPDX (or any format, really) we may have no CPEs
 			if config.GenerateMissingCPEs {
 				p.CPEs = cpes.Generate(p)
 			} else {
 				log.Debugf("no CPEs for package: %s", p)
 			}
 		}
-		pkgs = append(pkgs, New(p, enhancers...))
+
+		grypePkg := New(p, enhancers...)
+
+		// For rootio packages, also expose upstream-name-derived CPEs so the
+		// matchers' CPE path (apk NVD-CPE in particular) can reach upstream
+		// disclosures keyed under the canonical vendor:product. Symmetric to
+		// the resolver name fanout in db/v6/name; without this, syft's
+		// rootio-prefixed CPEs never align with NVD's openbsd:openssh-style
+		// records and the rootio NAK has nothing to suppress.
+		grypePkg.CPEs = append(grypePkg.CPEs, rootio.EquivalentCPEs(p, rootioJavaGroupID(grypePkg), grypePkg.CPEs)...)
+
+		pkgByID[grypePkg.ID] = &grypePkg
+		pkgs = append(pkgs, &grypePkg)
+
+		// track all owned locations
+		if owner, ok := p.Metadata.(FileOwner); ok {
+			for _, loc := range owner.OwnedFiles() {
+				ownedLocations[loc] = append(ownedLocations[loc], &grypePkg)
+			}
+		}
+	}
+
+	hasOverlapRelationships := false
+	for _, r := range relationships {
+		if !retainRelationshipType(r.Type) {
+			continue
+		}
+		fromPkg, fromOK := pkgByID[grypeID(r.From)]
+		toPkg, toOK := pkgByID[grypeID(r.To)]
+		if !fromOK || !toOK {
+			continue
+		}
+
+		if invertRelationship(r.Type) {
+			fromPkg, toPkg = toPkg, fromPkg
+		}
+
+		if fromPkg.RelatedPackages == nil {
+			fromPkg.RelatedPackages = map[artifact.RelationshipType][]*Package{}
+		}
+
+		// not all SBOMs include this relationship, we want to recreate this if it's missing
+		if r.Type == artifact.OwnershipByFileOverlapRelationship {
+			hasOverlapRelationships = true
+		}
+		fromPkg.RelatedPackages[r.Type] = append(fromPkg.RelatedPackages[r.Type], toPkg)
+	}
+
+	// recreate overlap-by-file-ownership based on owned files for SBOMs without these relationships
+	if !hasOverlapRelationships && len(ownedLocations) > 0 {
+		for _, p := range pkgs {
+			for _, loc := range p.Locations.ToUnorderedSlice() {
+				if contained, ok := ownedLocations[loc.RealPath]; ok {
+					for _, ownerPackage := range contained {
+						if ownerPackage == p {
+							continue
+						}
+						if p.RelatedPackages == nil {
+							p.RelatedPackages = map[artifact.RelationshipType][]*Package{}
+						}
+						p.RelatedPackages[artifact.OwnershipByFileOverlapRelationship] = append(p.RelatedPackages[artifact.OwnershipByFileOverlapRelationship], ownerPackage)
+					}
+				}
+			}
+		}
 	}
 
 	return pkgs
 }
 
-// Stringer to represent a package.
-func (p Package) String() string {
-	return fmt.Sprintf("Pkg(type=%s, name=%s, version=%s, upstreams=%d)", p.Type, p.Name, p.Version, len(p.Upstreams))
+// AddAnnotation appends value under key, keeping the slice sorted and de-duplicated.
+func (p *Package) AddAnnotation(key, value string) {
+	if p.Annotations == nil {
+		p.Annotations = map[string][]string{}
+	}
+	existing := p.Annotations[key]
+	if slices.Contains(existing, value) {
+		return
+	}
+	existing = append(existing, value)
+	sort.Strings(existing)
+	p.Annotations[key] = existing
 }
 
-func removePackagesByOverlap(catalog *syftPkg.Collection, relationships []artifact.Relationship, distro *distro.Distro) *syftPkg.Collection {
-	byOverlap := map[artifact.ID]artifact.Relationship{}
-	for _, r := range relationships {
-		if r.Type == artifact.OwnershipByFileOverlapRelationship {
-			byOverlap[r.To.ID()] = r
-		}
+func (p Package) String() string {
+	var d string
+	if p.Distro != nil {
+		d = fmt.Sprintf(", distro=%s", p.Distro.String())
 	}
+	var u string
+	if len(p.Upstreams) > 0 {
+		u = fmt.Sprintf(", upstreams=%d", len(p.Upstreams))
+	}
+	return fmt.Sprintf("Pkg(type=%s, name=%s, version=%s%s%s)", p.Type, p.Name, p.Version, u, d)
+}
 
-	out := syftPkg.NewCollection()
-	comprehensiveDistroFeed := distroFeedIsComprehensive(distro)
-	for p := range catalog.Enumerate() {
-		r, ok := byOverlap[p.ID()]
-		if ok {
-			from := catalog.Package(r.From.ID())
-			if from != nil && excludePackage(comprehensiveDistroFeed, p, *from) {
-				continue
+func removePackagesByOverlap(pkgs []*Package) []*Package {
+	return slices.DeleteFunc(pkgs, func(p *Package) bool {
+		if p.RelatedPackages == nil {
+			return false // don't delete
+		}
+		overlapping := p.RelatedPackages[artifact.OwnershipByFileOverlapRelationship]
+		if len(overlapping) == 0 {
+			return false
+		}
+		for _, from := range overlapping {
+			if excludePackage(p, from) {
+				return true
 			}
 		}
-		out.Add(p)
-	}
-
-	return out
+		return false
+	})
 }
 
-func excludePackage(comprehensiveDistroFeed bool, p syftPkg.Package, parent syftPkg.Package) bool {
+func excludePackage(p *Package, parent *Package) bool {
+	if p == nil || parent == nil || parent.Distro == nil {
+		return false
+	}
+
 	// NOTE: we are not checking the name because we have mismatches like:
 	// python      3.9.2      binary
 	// python3.9   3.9.2-1    deb
@@ -149,7 +263,7 @@ func excludePackage(comprehensiveDistroFeed bool, p syftPkg.Package, parent syft
 	// for distros that have a comprehensive feed. That is, distros that list
 	// vulnerabilities that aren't fixed. Otherwise, the child package might
 	// be needed for matching.
-	if comprehensiveDistroFeed && isOSPackage(parent) && !isOSPackage(p) {
+	if distroFeedIsComprehensive(parent.Distro) && isOSPackage(parent) && !isOSPackage(p) {
 		return true
 	}
 
@@ -192,14 +306,16 @@ func distroFeedIsComprehensive(dst *distro.Distro) bool {
 // sqlite3 vulnerability.db 'select distinct namespace from vulnerability where fix_state in ("wont-fix", "not-fixed") order by namespace;' | cut -d ':' -f 1 | sort | uniq
 // then removing 'github'
 var comprehensiveDistros = []distro.Type{
+	distro.ArchLinux,
 	distro.Azure,
 	distro.Debian,
 	distro.Mariner,
 	distro.RedHat,
+	distro.SLES,
 	distro.Ubuntu,
 }
 
-func isOSPackage(p syftPkg.Package) bool {
+func isOSPackage(p *Package) bool {
 	switch p.Type {
 	case syftPkg.DebPkg, syftPkg.RpmPkg, syftPkg.PortagePkg, syftPkg.AlpmPkg, syftPkg.ApkPkg:
 		return true
@@ -209,12 +325,12 @@ func isOSPackage(p syftPkg.Package) bool {
 }
 
 func dataFromPkg(p syftPkg.Package) (any, []UpstreamPackage) {
-	var metadata interface{}
+	var metadata any
 	var upstreams []UpstreamPackage
 
 	// use the metadata to determine the type of package
 	switch p.Metadata.(type) {
-	case syftPkg.GolangModuleEntry, syftPkg.GolangBinaryBuildinfoEntry:
+	case syftPkg.GolangModuleEntry, syftPkg.GolangBinaryBuildinfoEntry, syftPkg.GolangSourceEntry:
 		metadata = golangMetadataFromPkg(p)
 	case syftPkg.DpkgDBEntry:
 		upstreams = dpkgDataFromPkg(p)
@@ -262,9 +378,13 @@ func javaVMDataFromPkg(p syftPkg.Package) any {
 	return nil
 }
 
-func apkMetadataFromPkg(p syftPkg.Package) interface{} {
+func apkMetadataFromPkg(p syftPkg.Package) any {
 	if m, ok := p.Metadata.(syftPkg.ApkDBEntry); ok {
-		metadata := ApkMetadata{}
+		// Grype's APK Metadata only has files, so return early
+		// and leave the field blank if there are no files.
+		if len(m.Files) == 0 && m.Architecture == "" {
+			return nil
+		}
 
 		fileRecords := make([]ApkFileRecord, 0, len(m.Files))
 		for _, record := range m.Files {
@@ -272,15 +392,16 @@ func apkMetadataFromPkg(p syftPkg.Package) interface{} {
 			fileRecords = append(fileRecords, r)
 		}
 
-		metadata.Files = fileRecords
-
-		return metadata
+		return ApkMetadata{
+			Files: fileRecords,
+			Arch:  m.Architecture,
+		}
 	}
 
 	return nil
 }
 
-func golangMetadataFromPkg(p syftPkg.Package) interface{} {
+func golangMetadataFromPkg(p syftPkg.Package) any {
 	switch value := p.Metadata.(type) {
 	case syftPkg.GolangBinaryBuildinfoEntry:
 		metadata := GolangBinMetadata{}
@@ -291,10 +412,21 @@ func golangMetadataFromPkg(p syftPkg.Package) interface{} {
 		metadata.Architecture = value.Architecture
 		metadata.H1Digest = value.H1Digest
 		metadata.MainModule = value.MainModule
+		// normalize once here, on the provider path, so the gosymbols qualifier never re-normalizes
+		// per candidate vulnerability during matching.
+		metadata.Symbols = normalizeGoSymbols(value.Symbols)
 		return metadata
 	case syftPkg.GolangModuleEntry:
 		metadata := GolangModMetadata{}
 		metadata.H1Digest = value.H1Digest
+		return metadata
+	case syftPkg.GolangSourceEntry:
+		metadata := GolangSourceMetadata{}
+		metadata.H1Digest = value.H1Digest
+		metadata.OperatingSystem = value.OperatingSystem
+		metadata.Architecture = value.Architecture
+		metadata.BuildTags = value.BuildTags
+		metadata.CgoEnabled = value.CgoEnabled
 		return metadata
 	}
 	return nil
@@ -330,18 +462,24 @@ func rpmDataFromPkg(p syftPkg.Package) (metadata *RpmMetadata, upstreams []Upstr
 			upstreams = handleSourceRPM(p.Name, m.SourceRpm)
 		}
 
-		metadata = &RpmMetadata{
-			Epoch:           m.Epoch,
-			ModularityLabel: m.ModularityLabel,
+		if m.Epoch != nil || m.ModularityLabel != nil || m.Arch != "" {
+			metadata = &RpmMetadata{
+				Epoch:           m.Epoch,
+				ModularityLabel: m.ModularityLabel,
+				Arch:            m.Arch,
+			}
 		}
 	case syftPkg.RpmArchive:
 		if m.SourceRpm != "" {
 			upstreams = handleSourceRPM(p.Name, m.SourceRpm)
 		}
 
-		metadata = &RpmMetadata{
-			Epoch:           m.Epoch,
-			ModularityLabel: m.ModularityLabel,
+		if m.Epoch != nil || m.ModularityLabel != nil || m.Arch != "" {
+			metadata = &RpmMetadata{
+				Epoch:           m.Epoch,
+				ModularityLabel: m.ModularityLabel,
+				Arch:            m.Arch,
+			}
 		}
 	}
 	return metadata, upstreams
@@ -493,54 +631,37 @@ func handleDefaultUpstream(pkgName string, value string) []UpstreamPackage {
 	return nil
 }
 
-func setUpstreamsFromPURL(out *Package, purl packageurl.PackageURL, syftPkg syftPkg.Package) {
-	if len(out.Upstreams) == 0 {
-		out.Upstreams = upstreamsFromPURL(purl, syftPkg.Type)
-	}
-}
-
-// upstreamsFromPURL reads any additional data Grype can use, which is ignored by Syft's PURL conversion
-func upstreamsFromPURL(purl packageurl.PackageURL, pkgType syftPkg.Type) (upstreams []UpstreamPackage) {
-	for _, qualifier := range purl.Qualifiers {
-		if qualifier.Key == syftPkg.PURLQualifierUpstream {
-			for _, newUpstream := range parseUpstream(purl.Name, qualifier.Value, pkgType) {
-				if slices.Contains(upstreams, newUpstream) {
-					continue
-				}
-				upstreams = append(upstreams, newUpstream)
-			}
+func applyDistroOverride(override *distro.Distro) Enhancer {
+	// the override here comes from either the --distro flag, which already has a channel indication applied
+	return func(out *Package, _ packageurl.PackageURL, _ syftPkg.Package) {
+		if override == nil {
+			return
 		}
-	}
-	return upstreams
-}
-
-func setDistroFromPURL(out *Package, purl packageurl.PackageURL, _ syftPkg.Package) {
-	if out.Distro == nil {
-		out.Distro = distroFromPURL(purl)
+		// allow downstream matchers to always consider the given user distro
+		out.Distro = override
 	}
 }
 
-// distroFromPURL reads distro data for Grype can use, which is ignored by Syft's PURL conversion
-func distroFromPURL(purl packageurl.PackageURL) (d *distro.Distro) {
-	var distroName, distroVersion string
-
-	for _, qualifier := range purl.Qualifiers {
-		if qualifier.Key == syftPkg.PURLQualifierDistro {
-			fields := strings.SplitN(qualifier.Value, "-", 2)
-			distroName = fields[0]
-			if len(fields) > 1 {
-				distroVersion = fields[1]
-			}
-		}
+func invertRelationship(relationshipType artifact.RelationshipType) bool {
+	switch relationshipType {
+	case artifact.ContainsRelationship,
+		artifact.OwnershipByFileOverlapRelationship:
+		return true
+	default:
+		return false
 	}
-
-	if distroName != "" {
-		d = distro.NewFromNameVersion(distroName, distroVersion)
-	}
-
-	return d
 }
 
-type Enhancer func(out *Package, purl packageurl.PackageURL, pkg syftPkg.Package)
+func grypeID(identifiable artifact.Identifiable) ID {
+	return ID(identifiable.ID())
+}
 
-var purlEnhancers = []Enhancer{setUpstreamsFromPURL, setDistroFromPURL}
+func retainRelationshipType(relationshipType artifact.RelationshipType) bool {
+	switch relationshipType {
+	case artifact.ContainsRelationship,
+		artifact.OwnershipByFileOverlapRelationship:
+		return true
+	default:
+		return false
+	}
+}

@@ -59,6 +59,15 @@ func TestFuzzyVersionComparison(t *testing.T) {
 		{"8.0.456", "8.0.457", -1},
 		{"8.0.456+1", "8.0.456+2", -1},
 		{"8.0.456", "8.0.456+1", -1},
+		// Test case for fuzzy version comparison bug with patch numbers
+		// This should pass: 4.2.8p9 < 4.2.8p15 (p9 comes before p15 numerically)
+		// But currently fails due to lexicographic fallback where "p9" > "p15" (string comparison)
+		{"4.2.8p9", "4.2.8p15", -1},
+		// douple check openssl's unusual versioning
+		// 1.0.2k is an earlier patch release than 1.0.2l
+		{"1.0.2k", "1.0.2l", -1},
+		// 1.1.1w is a later patch on 1.1.1
+		{"1.1.1", "1.1.1w", -1},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%q vs %q", c.v1, c.v2), func(t *testing.T) {
@@ -398,5 +407,41 @@ func TestPseudoSemverPattern(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Equal(t, test.valid, pseudoSemverPattern.MatchString(test.version))
 		})
+	}
+}
+func TestStripLeadingV(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"v1.2.3", "1.2.3"},
+		{"V1.2.3", "1.2.3"},
+		{"1.2.3", "1.2.3"},
+		{"", ""},
+	}
+
+	for _, c := range cases {
+		got := stripLeadingV(c.in)
+		if got != c.want {
+			t.Fatalf("stripLeadingV(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+}
+func TestFuzzyVersionComparison_UppercaseV(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"v1.2.3", "V1.2.3", 0},
+		{"V1.2.3", "1.2.3", 0},
+		{"V1.2.3", "v1.2.4", -1},
+		{"v2.0", "V1.9.9", 1},
+	}
+
+	for _, c := range cases {
+		got := fuzzyVersionComparison(c.a, c.b)
+		if got != c.want {
+			t.Fatalf("fuzzyVersionComparison(%q, %q) = %d; want %d", c.a, c.b, got, c.want)
+		}
 	}
 }

@@ -53,8 +53,6 @@ func (g genericConstraint) Satisfied(version *Version) (bool, error) {
 		}
 		return true, nil
 	}
-	if version.Format != g.Fmt {
-		return false, newUnsupportedFormatError(g.Fmt, version)
-	}
+
 	return g.Expression.satisfied(g.Fmt, version)
 }

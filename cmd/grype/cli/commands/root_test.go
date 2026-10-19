@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -10,46 +11,27 @@ import (
 
 	"github.com/anchore/clio"
 	"github.com/anchore/grype/cmd/grype/cli/options"
+	"github.com/anchore/grype/grype/distro"
 	"github.com/anchore/grype/grype/match"
+	"github.com/anchore/grype/grype/matcher"
+	"github.com/anchore/grype/grype/matcher/dotnet"
+	"github.com/anchore/grype/grype/matcher/dpkg"
+	"github.com/anchore/grype/grype/matcher/golang"
+	"github.com/anchore/grype/grype/matcher/hex"
+	"github.com/anchore/grype/grype/matcher/java"
+	"github.com/anchore/grype/grype/matcher/javascript"
+	"github.com/anchore/grype/grype/matcher/python"
+	"github.com/anchore/grype/grype/matcher/rpm"
+	"github.com/anchore/grype/grype/matcher/ruby"
+	"github.com/anchore/grype/grype/matcher/rust"
+	"github.com/anchore/grype/grype/matcher/stock"
 	"github.com/anchore/grype/grype/pkg"
-	"github.com/anchore/grype/grype/vex"
+	"github.com/anchore/grype/grype/version"
+	vexStatus "github.com/anchore/grype/grype/vex/status"
 	"github.com/anchore/stereoscope/pkg/image"
 	"github.com/anchore/syft/syft"
 	"github.com/anchore/syft/syft/cataloging"
-	"github.com/anchore/syft/syft/pkg/cataloger/binary"
 )
-
-func Test_applyDistroHint(t *testing.T) {
-	ctx := pkg.Context{}
-	cfg := options.Grype{}
-
-	applyDistroHint([]pkg.Package{}, &ctx, &cfg)
-	assert.Nil(t, ctx.Distro)
-
-	// works when distro is nil
-	cfg.Distro = "alpine:3.10"
-	applyDistroHint([]pkg.Package{}, &ctx, &cfg)
-	assert.NotNil(t, ctx.Distro)
-
-	assert.Equal(t, "alpine", ctx.Distro.Name())
-	assert.Equal(t, "3.10", ctx.Distro.Version)
-
-	// does override an existing distro
-	cfg.Distro = "ubuntu:24.04"
-	applyDistroHint([]pkg.Package{}, &ctx, &cfg)
-	assert.NotNil(t, ctx.Distro)
-
-	assert.Equal(t, "ubuntu", ctx.Distro.Name())
-	assert.Equal(t, "24.04", ctx.Distro.Version)
-
-	// doesn't remove an existing distro when empty
-	cfg.Distro = ""
-	applyDistroHint([]pkg.Package{}, &ctx, &cfg)
-	assert.NotNil(t, ctx.Distro)
-
-	assert.Equal(t, "ubuntu", ctx.Distro.Name())
-	assert.Equal(t, "24.04", ctx.Distro.Version)
-}
 
 func Test_getProviderConfig(t *testing.T) {
 	tests := []struct {
@@ -68,10 +50,32 @@ func Test_getProviderConfig(t *testing.T) {
 					SBOMOptions: func() *syft.CreateSBOMConfig {
 						cfg := syft.DefaultCreateSBOMConfig()
 						cfg.Compliance.MissingVersion = cataloging.ComplianceActionDrop
+						// grype captures Go binary symbols by default; this is not syft's default
+						cfg.Packages.Golang = cfg.Packages.Golang.WithCaptureSymbols(cataloging.SymbolScopeAll)
 						return cfg
 					}(),
 					RegistryOptions: &image.RegistryOptions{
 						Credentials: []image.RegistryCredentials{},
+					},
+				},
+				SynthesisConfig: pkg.SynthesisConfig{
+					GenerateMissingCPEs: false,
+					Distro: pkg.DistroConfig{
+						Override: nil,
+						FixChannels: []distro.FixChannel{
+							{
+								Name:     "eus",
+								IDs:      []string{"rhel"},
+								Apply:    "auto",
+								Versions: version.MustGetConstraint(">= 8.0", version.SemanticFormat),
+							},
+							{
+								Name:     "esm",
+								IDs:      []string{"ubuntu"},
+								Apply:    "auto",
+								Versions: nil,
+							},
+						},
 					},
 				},
 			},
@@ -80,11 +84,170 @@ func Test_getProviderConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := cmp.Options{
-				cmpopts.IgnoreFields(binary.Classifier{}, "EvidenceMatcher"),
+				// func-typed fields (e.g. a binary classifier's EvidenceMatcher) are not comparable
+				cmp.FilterPath(func(p cmp.Path) bool {
+					return p.Last().Type().Kind() == reflect.Func
+				}, cmp.Ignore()),
 				cmpopts.IgnoreUnexported(syft.CreateSBOMConfig{}),
 			}
 			if d := cmp.Diff(tt.want, getProviderConfig(tt.opts), opts...); d != "" {
 				t.Errorf("getProviderConfig() mismatch (-want +got):\n%s", d)
+			}
+		})
+	}
+}
+
+func Test_getMatcherConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		opts *options.Grype
+		want matcher.Config
+	}{
+		{
+			name: "default options",
+			opts: options.DefaultGrype(clio.Identification{
+				Name:    "test",
+				Version: "1.0",
+			}),
+			want: matcher.Config{
+				Java: java.MatcherConfig{
+					ExternalSearchConfig: java.ExternalSearchConfig{
+						SearchMavenUpstream: false,
+						MavenBaseURL:        "https://search.maven.org/solrsearch/select",
+						MavenRateLimit:      300000000, // 300ms in nanoseconds
+					},
+					UseCPEs: false,
+				},
+				Ruby:       ruby.MatcherConfig{},
+				Python:     python.MatcherConfig{},
+				Dotnet:     dotnet.MatcherConfig{},
+				Javascript: javascript.MatcherConfig{},
+				Golang: golang.MatcherConfig{
+					UseCPEs:                                false,
+					AlwaysUseCPEForStdlib:                  false,
+					AllowMainModulePseudoVersionComparison: false,
+				},
+				Hex:   hex.MatcherConfig{},
+				Stock: stock.MatcherConfig{UseCPEs: true},
+				Rpm: rpm.MatcherConfig{
+					MissingEpochStrategy: "auto",
+				},
+				Dpkg: dpkg.MatcherConfig{
+					MissingEpochStrategy: "zero",
+				},
+			},
+		},
+		{
+			name: "rpm missing-epoch-strategy set to zero",
+			opts: func() *options.Grype {
+				opts := options.DefaultGrype(clio.Identification{Name: "test", Version: "1.0"})
+				opts.Match.Rpm.MissingEpochStrategy = "zero"
+				return opts
+			}(),
+			want: matcher.Config{
+				Java: java.MatcherConfig{
+					ExternalSearchConfig: java.ExternalSearchConfig{
+						SearchMavenUpstream: false,
+						MavenBaseURL:        "https://search.maven.org/solrsearch/select",
+						MavenRateLimit:      300000000,
+					},
+					UseCPEs: false,
+				},
+				Ruby:       ruby.MatcherConfig{},
+				Python:     python.MatcherConfig{},
+				Dotnet:     dotnet.MatcherConfig{},
+				Javascript: javascript.MatcherConfig{},
+				Golang: golang.MatcherConfig{
+					UseCPEs:                                false,
+					AlwaysUseCPEForStdlib:                  false,
+					AllowMainModulePseudoVersionComparison: false,
+				},
+				Hex:   hex.MatcherConfig{},
+				Stock: stock.MatcherConfig{UseCPEs: true},
+				Rpm: rpm.MatcherConfig{
+					MissingEpochStrategy: "zero",
+				},
+				Dpkg: dpkg.MatcherConfig{
+					MissingEpochStrategy: "zero",
+				},
+			},
+		},
+		{
+			name: "dpkg missing-epoch-strategy set to auto",
+			opts: func() *options.Grype {
+				opts := options.DefaultGrype(clio.Identification{Name: "test", Version: "1.0"})
+				opts.Match.Dpkg.MissingEpochStrategy = "auto"
+				return opts
+			}(),
+			want: matcher.Config{
+				Java: java.MatcherConfig{
+					ExternalSearchConfig: java.ExternalSearchConfig{
+						SearchMavenUpstream: false,
+						MavenBaseURL:        "https://search.maven.org/solrsearch/select",
+						MavenRateLimit:      300000000,
+					},
+					UseCPEs: false,
+				},
+				Ruby:       ruby.MatcherConfig{},
+				Python:     python.MatcherConfig{},
+				Dotnet:     dotnet.MatcherConfig{},
+				Javascript: javascript.MatcherConfig{},
+				Golang: golang.MatcherConfig{
+					UseCPEs:                                false,
+					AlwaysUseCPEForStdlib:                  false,
+					AllowMainModulePseudoVersionComparison: false,
+				},
+				Hex:   hex.MatcherConfig{},
+				Stock: stock.MatcherConfig{UseCPEs: true},
+				Rpm: rpm.MatcherConfig{
+					MissingEpochStrategy: "auto",
+				},
+				Dpkg: dpkg.MatcherConfig{
+					MissingEpochStrategy: "auto",
+				},
+			},
+		},
+		{
+			name: "rust using-cpes enabled",
+			opts: func() *options.Grype {
+				opts := options.DefaultGrype(clio.Identification{Name: "test", Version: "1.0"})
+				opts.Match.Rust.UseCPEs = true
+				return opts
+			}(),
+			want: matcher.Config{
+				Java: java.MatcherConfig{
+					ExternalSearchConfig: java.ExternalSearchConfig{
+						SearchMavenUpstream: false,
+						MavenBaseURL:        "https://search.maven.org/solrsearch/select",
+						MavenRateLimit:      300000000,
+					},
+					UseCPEs: false,
+				},
+				Ruby:       ruby.MatcherConfig{},
+				Python:     python.MatcherConfig{},
+				Dotnet:     dotnet.MatcherConfig{},
+				Javascript: javascript.MatcherConfig{},
+				Golang: golang.MatcherConfig{
+					UseCPEs:                                false,
+					AlwaysUseCPEForStdlib:                  false,
+					AllowMainModulePseudoVersionComparison: false,
+				},
+				Rust:  rust.MatcherConfig{UseCPEs: true},
+				Hex:   hex.MatcherConfig{},
+				Stock: stock.MatcherConfig{UseCPEs: true},
+				Rpm: rpm.MatcherConfig{
+					MissingEpochStrategy: "auto",
+				},
+				Dpkg: dpkg.MatcherConfig{
+					MissingEpochStrategy: "zero",
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if d := cmp.Diff(tt.want, getMatcherConfig(tt.opts)); d != "" {
+				t.Errorf("getMatcherConfig() mismatch (-want +got):\n%s", d)
 			}
 		})
 	}
@@ -114,8 +277,8 @@ func Test_applyVexRules(t *testing.T) {
 			vexDocuments:       []string{"path/to/vex.json"},
 			vexAdd:             []string{},
 			expectedIgnoreRules: []match.IgnoreRule{
-				{VexStatus: string(vex.StatusNotAffected)},
-				{VexStatus: string(vex.StatusFixed)},
+				{VexStatus: string(vexStatus.NotAffected)},
+				{VexStatus: string(vexStatus.Fixed)},
 			},
 			expectError: false,
 		},
@@ -128,8 +291,8 @@ func Test_applyVexRules(t *testing.T) {
 			vexAdd:       []string{},
 			expectedIgnoreRules: []match.IgnoreRule{
 				{Vulnerability: "CVE-2023-1234"},
-				{VexStatus: string(vex.StatusNotAffected)},
-				{VexStatus: string(vex.StatusFixed)},
+				{VexStatus: string(vexStatus.NotAffected)},
+				{VexStatus: string(vexStatus.Fixed)},
 			},
 			expectError: false,
 		},
@@ -139,10 +302,10 @@ func Test_applyVexRules(t *testing.T) {
 			vexDocuments:       []string{"path/to/vex.json"},
 			vexAdd:             []string{"affected", "under_investigation"},
 			expectedIgnoreRules: []match.IgnoreRule{
-				{VexStatus: string(vex.StatusNotAffected)},
-				{VexStatus: string(vex.StatusFixed)},
-				{VexStatus: string(vex.StatusAffected)},
-				{VexStatus: string(vex.StatusUnderInvestigation)},
+				{VexStatus: string(vexStatus.NotAffected)},
+				{VexStatus: string(vexStatus.Fixed)},
+				{VexStatus: string(vexStatus.Affected)},
+				{VexStatus: string(vexStatus.UnderInvestigation)},
 			},
 			expectError: false,
 		},
@@ -175,9 +338,9 @@ func Test_applyVexRules(t *testing.T) {
 			expectedIgnoreRules: []match.IgnoreRule{
 				{Vulnerability: "CVE-2023-1234"},
 				{FixState: "unknown"},
-				{VexStatus: string(vex.StatusNotAffected)},
-				{VexStatus: string(vex.StatusFixed)},
-				{VexStatus: string(vex.StatusAffected)},
+				{VexStatus: string(vexStatus.NotAffected)},
+				{VexStatus: string(vexStatus.Fixed)},
+				{VexStatus: string(vexStatus.Affected)},
 			},
 			expectError: false,
 		},
