@@ -47,5 +47,7 @@ type Strategy interface {
 var strategies = []Strategy{
 	almaStrategy{},
 	bitnamiStrategy{},
+	govulndbStrategy{},
 	rootioStrategy{},
+	chainguardStrategy{},
 }

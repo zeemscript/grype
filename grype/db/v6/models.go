@@ -52,6 +52,7 @@ func Models() []any {
 		&OperatingSystemSpecifierOverride{},
 		&Package{},
 		&PackageSpecifierOverride{},
+		&ArchitectureAlias{},
 
 		// CPE related search tables
 		&AffectedCPEHandle{},   // join on CPE
@@ -63,6 +64,7 @@ func Models() []any {
 		&EpssHandle{},
 		&EpssMetadata{},
 		&CWEHandle{},
+		&SsvcHandle{},
 	}
 }
 
@@ -533,6 +535,22 @@ type PackageSpecifierOverride struct {
 	ReplacementEcosystem *string `gorm:"column:replacement_ecosystem;primaryKey"`
 }
 
+// ArchitectureAlias folds an architecture spelling onto a canonical token shared by every
+// dialect spelling of the same CPU architecture (e.g. rpm "x86_64" and deb/OCI "amd64" both
+// fold to "amd64"). The architecture qualifier reads this table at match time so cross-dialect
+// arch comparisons don't drop real matches; the data lives in the DB rather than the grype
+// binary so the folding can change without a release. See pkg/qualifier/architecture.
+type ArchitectureAlias struct {
+	// Alias is an architecture spelling as it may appear on a package or vulnerability entry
+	// (e.g. "x86_64"). Only non-canonical spellings are stored; a canonical token resolves to
+	// itself by absence.
+	Alias string `gorm:"column:alias;primaryKey"`
+
+	// Canonical is the token Alias folds to (e.g. "amd64"). The choice of token is arbitrary;
+	// only equivalence across spellings matters.
+	Canonical string `gorm:"column:canonical;not null"`
+}
+
 // OperatingSystem represents a specific release of an operating system. The resolution of the version is
 // relative to the available data by the vulnerability data provider, so though there may be major.minor.patch OS
 // releases, there may only be data available for major.minor.
@@ -964,6 +982,30 @@ type CWEHandle struct {
 
 func (c CWEHandle) String() string {
 	return fmt.Sprintf("CWE(%s: %s, source=%s, type=%s)", c.CVE, c.CWE, c.Source, c.Type)
+}
+
+// SsvcHandle carries one SSVC (Stakeholder-Specific Vulnerability Categorization)
+// decision-point assessment for a CVE, one row per entry in NVD's metrics.ssvcV203 array.
+// NVD emits several entries for the same CVE and source, so a row is not unique by either.
+// Byte-identical repeats are dropped at build time; entries differing in any field, including
+// a later re-assessment from the same source, are all kept, and rows come back unordered.
+// A reader wanting the current assessment picks by Timestamp. See CWEHandle for the precedent
+// this follows.
+type SsvcHandle struct {
+	ID int64 `gorm:"primaryKey"`
+
+	Cve             string     `gorm:"column:cve;not null;index:ssvc_cve_idx,collate:NOCASE"`
+	Source          string     `gorm:"column:source"`
+	Role            string     `gorm:"column:role"`
+	Version         string     `gorm:"column:version"`
+	Timestamp       *time.Time `gorm:"column:timestamp"`
+	Exploitation    string     `gorm:"column:exploitation"`
+	Automatable     string     `gorm:"column:automatable"`
+	TechnicalImpact string     `gorm:"column:technical_impact"`
+}
+
+func (s SsvcHandle) String() string {
+	return fmt.Sprintf("SSVC(%s: source=%s, role=%s, exploitation=%s, automatable=%s, technicalImpact=%s)", s.Cve, s.Source, s.Role, s.Exploitation, s.Automatable, s.TechnicalImpact)
 }
 
 // OperatingSystemEOLHandle carries end-of-life data for an operating system.

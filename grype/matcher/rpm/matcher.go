@@ -46,6 +46,7 @@ type Matcher struct {
 type MatcherConfig struct {
 	MissingEpochStrategy version.MissingEpochStrategy
 	UseCPEsForEOL        bool
+	UseCPEs              bool
 }
 
 func NewRpmMatcher(cfg MatcherConfig) *Matcher {
@@ -94,15 +95,20 @@ func (m *Matcher) Match(vp vulnerability.Provider, p pkg.Package) ([]match.Match
 		ignored = append(ignored, ignores...)
 	}
 
-	// if configured, also search by CPEs for packages from EOL distros
-	if m.cfg.UseCPEsForEOL && internal.IsDistroEOL(vp, p.Distro) {
+	// if configured, also search by CPEs, either for every package or only for packages from EOL distros
+	searchByCPE := m.cfg.UseCPEs
+	if !searchByCPE && m.cfg.UseCPEsForEOL && internal.IsDistroEOL(vp, p.Distro) {
 		log.WithFields("package", p.Name, "distro", p.Distro).Debug("distro is EOL, searching by CPEs")
+		searchByCPE = true
+	}
+
+	if searchByCPE {
 		cpeMatches, ignores, err := internal.MatchPackageByCPEs(vp, p, m.Type())
 		switch {
 		case errors.Is(err, internal.ErrEmptyCPEMatch):
-			log.WithFields("package", p.Name).Debug("package has no CPEs for EOL fallback matching")
+			log.WithFields("package", p.Name).Debug("package has no CPEs to match by")
 		case err != nil:
-			log.WithFields("package", p.Name, "error", err).Debug("failed to match by CPEs for EOL distro")
+			log.WithFields("package", p.Name, "error", err).Debug("failed to match by CPEs")
 		default:
 			matches = append(matches, cpeMatches...)
 			ignored = append(ignored, ignores...)
@@ -215,7 +221,11 @@ func (m *Matcher) matchUpstreamPackages(vp vulnerability.Provider, p pkg.Package
 	var ignored []match.IgnoreFilter
 
 	for _, indirectPackage := range pkg.UpstreamPackages(p) {
-		indirectMatches, ignores, err := m.findMatches(provider, indirectPackage, internal.SourceOrUnspecifiedArch())
+		// An rpm's upstream is its source rpm, so tag the synthesized package "src". The
+		// architecture qualifier then matches it only against src (and unspecified) records
+		// and rejects binary-arch records — which is how we avoid matching a binary's
+		// upstream against a sibling binary's vulnerability.
+		indirectMatches, ignores, err := m.findMatches(provider, indirectPackage)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to find vulnerabilities for rpm upstream source package: %w", err)
 		}
@@ -226,7 +236,7 @@ func (m *Matcher) matchUpstreamPackages(vp vulnerability.Provider, p pkg.Package
 	return matches, ignored, nil
 }
 
-func (m *Matcher) findMatches(provider result.Provider, searchPkg pkg.Package, extra ...vulnerability.Criteria) ([]match.Match, []match.IgnoreFilter, error) {
+func (m *Matcher) findMatches(provider result.Provider, searchPkg pkg.Package) ([]match.Match, []match.IgnoreFilter, error) {
 	if searchPkg.Distro == nil {
 		return nil, nil, nil
 	}
@@ -237,13 +247,13 @@ func (m *Matcher) findMatches(provider result.Provider, searchPkg pkg.Package, e
 
 	switch {
 	case shouldUseRedhatEUSMatching(searchPkg.Distro):
-		return redhatEUSMatches(provider, searchPkg, m.cfg.MissingEpochStrategy, extra...)
+		return redhatEUSMatches(provider, searchPkg, m.cfg.MissingEpochStrategy)
 	default:
-		return m.standardMatches(provider, searchPkg, extra...)
+		return m.standardMatches(provider, searchPkg)
 	}
 }
 
-func (m *Matcher) standardMatches(provider result.Provider, searchPkg pkg.Package, extra ...vulnerability.Criteria) ([]match.Match, []match.IgnoreFilter, error) {
+func (m *Matcher) standardMatches(provider result.Provider, searchPkg pkg.Package) ([]match.Match, []match.IgnoreFilter, error) {
 	// Create version with config embedded
 	pkgVersion := version.NewWithConfig(
 		searchPkg.Version,
@@ -258,7 +268,6 @@ func (m *Matcher) standardMatches(provider result.Provider, searchPkg pkg.Packag
 		search.ByDistro(*searchPkg.Distro),
 		internal.OnlyQualifiedPackages(searchPkg),
 	}
-	disclosureCriteria = append(disclosureCriteria, extra...)
 
 	all, err := provider.FindResults(disclosureCriteria...)
 	if err != nil {
@@ -272,7 +281,6 @@ func (m *Matcher) standardMatches(provider result.Provider, searchPkg pkg.Packag
 		internal.OnlyVulnerableVersions(pkgVersion),
 		search.ForUnaffected(),
 	}
-	unaffectedCriteria = append(unaffectedCriteria, extra...)
 
 	unaffected, err := provider.FindResults(unaffectedCriteria...)
 	if err != nil {

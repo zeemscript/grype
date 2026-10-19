@@ -24,7 +24,7 @@ const (
 	Revision = 1
 
 	// Addition indicates how many changes have been introduced that are compatible with all historical data
-	Addition = 6
+	Addition = 10
 
 	// v6 model changelog:
 	// 6.0.0: Initial version 🎉
@@ -44,6 +44,24 @@ const (
 	//        vulnerabilities that only apply to Root IO-backported packages; the rootio
 	//        runtime qualifier in pkg/qualifier/rootio filters non-Root-IO packages out via
 	//        the NAK pattern)
+	// 6.1.7: Rename PackageQualifiers.RpmArch (json: rpm_arch) to Architecture (json:
+	//        architecture). The field's semantics are unchanged; the rename drops the rpm-
+	//        specific prefix because the value already lives in PackageQualifiers and can
+	//        carry any architecture string for future arch-scoped advisories.
+	// 6.1.8: Add ArchitectureAlias table (architecture_aliases). The architecture qualifier
+	//        reads it at match time to fold dialect arch spellings (e.g. "x86_64" <-> "amd64")
+	//        onto a canonical token. Older clients ignore the table; clients reading a DB built
+	//        before it existed fall back to the built-in default aliases.
+	// 6.1.9: Add GoImports field to PackageQualifiers (used by the govulndb OSV strategy to
+	//        carry per-symbol matching from ecosystem_specific.imports; the gosymbols
+	//        runtime qualifier in pkg/qualifier/gosymbols matches captured Go binary symbols
+	//        so stdlib and golang.org/x/* advisories don't FP-match binaries that don't use
+	//        vulnerable symbols)
+	// 6.1.10: Add SsvcHandle to VulnerabilityDecorator store (table: ssvc_handles). Carries
+	//         NVD's metrics.ssvcV203 decision-point assessments (source, role, version,
+	//         timestamp, exploitation, automatable, technicalImpact), one row per CVE and
+	//         source. Not surfaced in vulnerability.Metadata or scan output; readable only via
+	//         Reader.GetSsvcs.
 )
 
 const (
@@ -73,6 +91,7 @@ type Reader interface {
 	UnaffectedPackageStoreReader
 	AffectedCPEStoreReader
 	UnaffectedCPEStoreReader
+	ArchitectureAliasStoreReader
 	io.Closer
 	attachBlobValue(...blobable) error
 }
