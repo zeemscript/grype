@@ -28,6 +28,7 @@ import (
 	"github.com/anchore/grype/grype/matcher/python"
 	"github.com/anchore/grype/grype/matcher/rpm"
 	"github.com/anchore/grype/grype/matcher/ruby"
+	"github.com/anchore/grype/grype/matcher/rust"
 	"github.com/anchore/grype/grype/matcher/stock"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/presenter/models"
@@ -72,7 +73,7 @@ You can also explicitly specify the scheme to use:
     {{.appName}} purl:path/to/purl/file                 read a newline separated file of package URLs from a path on disk
     {{.appName}} PURL                                   read a single package PURL directly (e.g. pkg:apk/openssl@3.2.1?distro=alpine-3.20.3)
     {{.appName}} cpes:path/to/cpes/file                 read a newline separated file of package CPEs from a path on disk
-    {{.appName}} CPE                                    read a single CPE directly (e.g. cpe:2.3:a:openssl:openssl:3.0.14:*:*:*:*:*)
+    {{.appName}} CPE                                    read a single CPE directly (e.g. cpe:2.3:a:openssl:openssl:3.0.14:*:*:*:*:*:*:* or cpe:/a:openssl:openssl:3.0.14)
     {{.appName}} zarf:path/to/package.tar.zst           scan all SBOMs within a Zarf package archive
 
 You can also pipe in Syft JSON directly:
@@ -233,6 +234,7 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 		Alerts: grype.AlertsConfig{
 			EnableEOLDistroWarnings: opts.Alerts.EnableEOLDistroWarnings,
 		},
+		IncludeMatcherSuppressions: opts.IncludeMatcherSuppressions,
 	}
 
 	remainingMatches, ignoredMatches, err := vulnMatcher.FindMatchesContext(ctx, packages, pkgContext)
@@ -382,15 +384,18 @@ func getMatcherConfig(opts *options.Grype) matcher.Config {
 			AlwaysUseCPEForStdlib:                  opts.Match.Golang.AlwaysUseCPEForStdlib,
 			AllowMainModulePseudoVersionComparison: opts.Match.Golang.AllowMainModulePseudoVersionComparison,
 		},
+		Rust:  rust.MatcherConfig(opts.Match.Rust),
 		Hex:   hex.MatcherConfig(opts.Match.Hex),
 		Stock: stock.MatcherConfig(opts.Match.Stock),
 		Dpkg: dpkg.MatcherConfig{
 			MissingEpochStrategy: opts.Match.Dpkg.MissingEpochStrategy,
 			UseCPEsForEOL:        opts.Match.Dpkg.UseCPEsForEOL,
+			UseCPEs:              opts.Match.Dpkg.UseCPEs,
 		},
 		Rpm: rpm.MatcherConfig{
 			MissingEpochStrategy: opts.Match.Rpm.MissingEpochStrategy,
 			UseCPEsForEOL:        opts.Match.Rpm.UseCPEsForEOL,
+			UseCPEs:              opts.Match.Rpm.UseCPEs,
 		},
 	}
 }
