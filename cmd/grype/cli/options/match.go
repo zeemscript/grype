@@ -93,7 +93,7 @@ func defaultGolangConfig() golangConfig {
 		matcherConfig: matcherConfig{
 			UseCPEs: false,
 		},
-		AlwaysUseCPEForStdlib:                  true,
+		AlwaysUseCPEForStdlib:                  false,
 		AllowMainModulePseudoVersionComparison: false,
 	}
 }
@@ -174,6 +174,8 @@ func (cfg *matchConfig) DescribeFields(descriptions clio.FieldDescriptionSet) {
 	descriptions.Add(&cfg.Rust.UseCPEs, usingCpeDescription)
 	descriptions.Add(&cfg.Hex.UseCPEs, usingCpeDescription)
 	descriptions.Add(&cfg.Stock.UseCPEs, usingCpeDescription)
+	descriptions.Add(&cfg.Dpkg.UseCPEs, usingCpeDescription)
+	descriptions.Add(&cfg.Rpm.UseCPEs, usingCpeDescription)
 	descriptions.Add(&cfg.Dpkg.MissingEpochStrategy,
 		`strategy for handling missing epochs in dpkg package versions during matching (options: zero, auto)`)
 	descriptions.Add(&cfg.Rpm.MissingEpochStrategy,
