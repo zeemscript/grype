@@ -536,6 +536,46 @@ func addSlesMatches(t *testing.T, theSource source.Source, catalog *syftPkg.Coll
 	})
 }
 
+func addArchMatches(t *testing.T, theSource source.Source, catalog *syftPkg.Collection, provider vulnerability.Provider, theResult *match.Matches) {
+	packages := catalog.PackagesByPath("/var/lib/pacman/local/xz-5.2.4-1/desc")
+	if len(packages) != 1 {
+		t.Logf("Arch Packages: %+v", packages)
+		t.Fatalf("problem with upstream syft cataloger (pacman)")
+	}
+	thePkg := pkg.New(packages[0])
+	vulns, err := provider.FindVulnerabilities(byNamespace("arch:distro:arch:rolling"), search.ByPackageName(thePkg.Name))
+	require.NoError(t, err)
+	require.NotEmpty(t, vulns)
+	vulnObj := vulns[0]
+
+	theResult.Add(match.Match{
+		Vulnerability: vulnObj,
+		Package:       thePkg,
+		Details: []match.Detail{
+			{
+				Type:       match.ExactDirectMatch,
+				Confidence: 1.0,
+				SearchedBy: match.DistroParameters{
+					Distro: match.DistroIdentification{
+						Type:    "archlinux",
+						Version: "",
+					},
+					Namespace: "arch:distro:arch:rolling",
+					Package: match.PackageParameter{
+						Name:    "xz",
+						Version: "5.2.4-1",
+					},
+				},
+				Found: match.DistroResult{
+					VersionConstraint: "< 5.6.1-2 (pacman)",
+					VulnerabilityID:   vulnObj.ID,
+				},
+				Matcher: match.PacmanMatcher,
+			},
+		},
+	})
+}
+
 func addHaskellMatches(t *testing.T, theSource source.Source, catalog *syftPkg.Collection, provider vulnerability.Provider, theResult *match.Matches) {
 	packages := catalog.PackagesByPath("/haskell/stack.yaml")
 	if len(packages) < 1 {
@@ -568,6 +608,43 @@ func addHaskellMatches(t *testing.T, theSource source.Source, catalog *syftPkg.C
 					VulnerabilityID:   "CVE-haskell-sample",
 				},
 				Matcher: match.StockMatcher,
+			},
+		},
+	})
+}
+
+func addHexMatches(t *testing.T, theSource source.Source, catalog *syftPkg.Collection, provider vulnerability.Provider, theResult *match.Matches) {
+	packages := catalog.PackagesByPath("/hex/mix.lock")
+	if len(packages) < 1 {
+		t.Logf("Hex Packages: %+v", packages)
+		t.Fatalf("problem with upstream syft cataloger (elixir-mix-lock)")
+	}
+	thePkg := pkg.New(packages[0])
+	vulns, err := provider.FindVulnerabilities(byNamespace("github:language:elixir"), search.ByPackageName(thePkg.Name))
+	require.NoError(t, err)
+	require.NotEmpty(t, vulns)
+	vulnObj := vulns[0]
+
+	theResult.Add(match.Match{
+		Vulnerability: vulnObj,
+		Package:       thePkg,
+		Details: []match.Detail{
+			{
+				Type:       match.ExactDirectMatch,
+				Confidence: 1.0,
+				SearchedBy: match.EcosystemParameters{
+					Language:  "elixir",
+					Namespace: "github:language:elixir",
+					Package: match.PackageParameter{
+						Name:    thePkg.Name,
+						Version: thePkg.Version,
+					},
+				},
+				Found: match.EcosystemResult{
+					VersionConstraint: "< 1.12.0 (unknown)",
+					VulnerabilityID:   "CVE-hex-plug",
+				},
+				Matcher: match.HexMatcher,
 			},
 		},
 	})
@@ -683,6 +760,7 @@ func TestMatchByImage(t *testing.T) {
 				addDotnetMatches(t, theSource, catalog, provider, &expectedMatches)
 				addGolangMatches(t, theSource, catalog, provider, &expectedMatches)
 				addHaskellMatches(t, theSource, catalog, provider, &expectedMatches)
+				addHexMatches(t, theSource, catalog, provider, &expectedMatches)
 				return expectedMatches
 			},
 		},
@@ -707,6 +785,14 @@ func TestMatchByImage(t *testing.T) {
 			expectedFn: func(theSource source.Source, catalog *syftPkg.Collection, provider vulnerability.Provider) match.Matches {
 				expectedMatches := match.NewMatches()
 				addSlesMatches(t, theSource, catalog, provider, &expectedMatches)
+				return expectedMatches
+			},
+		},
+		{
+			name: "image-arch-match-coverage",
+			expectedFn: func(theSource source.Source, catalog *syftPkg.Collection, provider vulnerability.Provider) match.Matches {
+				expectedMatches := match.NewMatches()
+				addArchMatches(t, theSource, catalog, provider, &expectedMatches)
 				return expectedMatches
 			},
 		},
@@ -788,11 +874,11 @@ func TestMatchByImage(t *testing.T) {
 				},
 			})
 
-			actualResults := grype.FindVulnerabilitiesForPackage(theProvider, matchers, pkg.FromCollection(s.Artifacts.Packages, pkg.SynthesisConfig{
+			actualResults := grype.FindVulnerabilitiesForPackage(theProvider, matchers, pkg.FromPtrs(pkg.FromCollection(s.Artifacts.Packages, s.Relationships, pkg.SynthesisConfig{
 				Distro: pkg.DistroConfig{
 					Override: distro.FromRelease(s.Artifacts.LinuxDistribution, distro.DefaultFixChannels()),
 				},
-			}))
+			})))
 			for _, m := range actualResults.Sorted() {
 				for _, d := range m.Details {
 					observedMatchers.Add(string(d.Matcher))
@@ -812,10 +898,10 @@ func TestMatchByImage(t *testing.T) {
 		vexStatus    vexStatus.Status
 		vexDocuments []string
 	}{
-		"csaf-affected":               {vexStatus.Affected, []string{"test-fixtures/vex/csaf/affected.csaf.json"}},
-		"csaf-under_investigation":    {vexStatus.UnderInvestigation, []string{"test-fixtures/vex/csaf/under_investigation.csaf.json"}},
-		"openvex-affected":            {vexStatus.Affected, []string{"test-fixtures/vex/openvex/affected.openvex.json"}},
-		"openvex-under_investigation": {vexStatus.UnderInvestigation, []string{"test-fixtures/vex/openvex/under_investigation.openvex.json"}},
+		"csaf-affected":               {vexStatus.Affected, []string{"testdata/vex/csaf/affected.csaf.json"}},
+		"csaf-under_investigation":    {vexStatus.UnderInvestigation, []string{"testdata/vex/csaf/under_investigation.csaf.json"}},
+		"openvex-affected":            {vexStatus.Affected, []string{"testdata/vex/openvex/affected.openvex.json"}},
+		"openvex-under_investigation": {vexStatus.UnderInvestigation, []string{"testdata/vex/openvex/under_investigation.openvex.json"}},
 	} {
 		t.Run(n, func(t *testing.T) {
 			ignoredMatches := testIgnoredMatches()
@@ -841,7 +927,24 @@ func TestMatchByImage(t *testing.T) {
 				)
 			}
 
-			result.Details = result.Details[:len(result.Details)-1]
+			// the VEX processor contributes exactly one detail to the match it un-ignores and leaves
+			// the rest of the match alone. Matches.Add normalizes the details of every match it
+			// stores -- deduped and sorted strongest-first -- so the VEX detail is not necessarily
+			// the last one; select it by its matcher and compare what remains to the original match.
+			var vexDetails, originalDetails match.Details
+			for _, detail := range result.Details {
+				switch detail.Matcher {
+				case match.OpenVexMatcher, match.CsafVexMatcher:
+					vexDetails = append(vexDetails, detail)
+				default:
+					originalDetails = append(originalDetails, detail)
+				}
+			}
+			if len(vexDetails) != 1 {
+				t.Errorf("expected exactly one VEX detail on the VEXed result, got %d", len(vexDetails))
+			}
+
+			result.Details = originalDetails
 			actualResults := match.NewMatches()
 			actualResults.Add(result)
 

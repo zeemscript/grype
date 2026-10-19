@@ -104,7 +104,7 @@ func TestNewLatestFromReader(t *testing.T) {
 func TestLatestDocument_Write(t *testing.T) {
 
 	errContains := func(text string) require.ErrorAssertionFunc {
-		return func(t require.TestingT, err error, msgAndArgs ...interface{}) {
+		return func(t require.TestingT, err error, msgAndArgs ...any) {
 			require.ErrorContains(t, err, text, msgAndArgs...)
 		}
 	}
@@ -271,6 +271,7 @@ func TestNewArchive(t *testing.T) {
 			require.NoError(t, err)
 			_, err = tempFile.WriteString(tt.contents)
 			require.NoError(t, err)
+			require.NoError(t, tempFile.Close())
 
 			archive, err := NewArchive(tempFile.Name(), tt.time, tt.model, tt.revision, tt.addition)
 			tt.expectErr(t, err)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mholt/archives"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -136,6 +137,11 @@ func writeTestDescriptionToDB(t *testing.T, dir string, desc db.Description) str
 	require.NoError(t, d.Create(instance).Error)
 
 	require.NoError(t, d.Exec("VACUUM").Error)
+
+	// release the file before hashing it (and so the temp dir can be removed on windows)
+	sqlDB, err := d.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
 
 	digest, err := db.CalculateDBDigest(afero.NewOsFs(), c.DBFilePath())
 	require.NoError(t, err)
@@ -449,7 +455,7 @@ func TestCurator_validateAge(t *testing.T) {
 			description: &db.Description{
 				Built: hoursAgo(48),
 			},
-			wantErr: func(t require.TestingT, err error, msgAndArgs ...interface{}) {
+			wantErr: func(t require.TestingT, err error, msgAndArgs ...any) {
 				require.ErrorContains(t, err, "the vulnerability database was built")
 			},
 		},
@@ -458,14 +464,14 @@ func TestCurator_validateAge(t *testing.T) {
 			description: &db.Description{
 				Built: hoursAgo(50),
 			},
-			wantErr: func(t require.TestingT, err error, msgAndArgs ...interface{}) {
+			wantErr: func(t require.TestingT, err error, msgAndArgs ...any) {
 				require.ErrorContains(t, err, "the vulnerability database was built")
 			},
 		},
 		{
 			name:        "no metadata",
 			description: nil,
-			wantErr: func(t require.TestingT, err error, msgAndArgs ...interface{}) {
+			wantErr: func(t require.TestingT, err error, msgAndArgs ...any) {
 				require.ErrorContains(t, err, "no metadata to validate")
 			},
 		},
@@ -522,6 +528,7 @@ func TestCurator_validateIntegrity(t *testing.T) {
 
 		m, err := s.GetDBMetadata()
 		require.NoError(t, err)
+		require.NoError(t, s.Close())
 
 		return ci.(curator), db.DescriptionFromMetadata(m)
 	}
@@ -913,6 +920,37 @@ func TestCurator_Import_URL_UsesDBRootDirForDownloadTempBaseAndCleansUp(t *testi
 		_, statErr := c.fs.Stat(downloadedContentPath)
 		require.True(t, os.IsNotExist(statErr), "expected temp import directory to be cleaned up")
 	})
+}
+
+func Test_unarchive(t *testing.T) {
+	testFile := filepath.Join(t.TempDir(), "vulnerability.db")
+	f, err := os.Create(testFile)
+	require.NoError(t, err)
+	f.Close()
+
+	files, err := archives.FilesFromDisk(t.Context(), nil, map[string]string{
+		testFile: "",
+	})
+	require.NoError(t, err)
+
+	source := filepath.Join(t.TempDir(), "archive.tar.zst")
+	out, err := os.Create(source)
+	require.NoError(t, err)
+
+	format := archives.CompressedArchive{
+		Compression: archives.Zstd{},
+		Archival:    archives.Tar{},
+	}
+	err = format.Archive(t.Context(), out, files)
+	require.NoError(t, err)
+	require.NoError(t, out.Close())
+
+	destination := t.TempDir()
+	err = unarchive(source, destination)
+	require.NoError(t, err)
+
+	expectFile := filepath.Join(destination, "vulnerability.db")
+	require.FileExists(t, expectFile)
 }
 
 func setupTestDB(t *testing.T, dbDir string) db.ReadWriter {

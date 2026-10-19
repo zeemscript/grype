@@ -15,7 +15,7 @@ import (
 	"github.com/anchore/syft/syft/source/sourceproviders"
 )
 
-func syftProvider(userInput string, config ProviderConfig, applyChannel func(*distro.Distro) bool) ([]Package, Context, *sbom.SBOM, error) {
+func syftProvider(userInput string, config ProviderConfig, applyChannel func(*distro.Distro)) ([]*Package, Context, *sbom.SBOM, error) {
 	src, err := getSource(userInput, config)
 	if err != nil {
 		return nil, Context{}, nil, err
@@ -33,27 +33,28 @@ func syftProvider(userInput string, config ProviderConfig, applyChannel func(*di
 
 	srcDescription := src.Describe()
 
-	d := distroFromSBOM(s, config, applyChannel)
+	d, distroDetectionFailed := distroFromSBOM(s, config, applyChannel)
 
-	pkgCatalog := removePackagesByOverlap(s.Artifacts.Packages, s.Relationships, d)
-
-	packages := FromCollection(pkgCatalog, config.SynthesisConfig)
+	packages := FromCollection(s.Artifacts.Packages, s.Relationships, config.SynthesisConfig)
 	pkgCtx := Context{
-		Source: &srcDescription,
-		Distro: d,
+		Source:                &srcDescription,
+		Distro:                d,
+		DistroDetectionFailed: distroDetectionFailed,
 	}
 
 	return packages, pkgCtx, s, nil
 }
 
-func distroFromSBOM(s *sbom.SBOM, config ProviderConfig, applyChannel func(*distro.Distro) bool) (d *distro.Distro) {
+func distroFromSBOM(s *sbom.SBOM, config ProviderConfig, applyChannel func(*distro.Distro)) (d *distro.Distro, detectionFailed bool) {
 	if config.Distro.Override != nil {
 		d = config.Distro.Override
 	} else {
 		d = distro.FromRelease(s.Artifacts.LinuxDistribution, config.Distro.FixChannels)
 		applyChannel(d)
+		// detection failed if we had linux release info but couldn't determine distro type
+		detectionFailed = s.Artifacts.LinuxDistribution != nil && d == nil
 	}
-	return d
+	return d, detectionFailed
 }
 
 func getSource(userInput string, config ProviderConfig) (source.Source, error) {
@@ -70,11 +71,15 @@ func getSource(userInput string, config ProviderConfig) (source.Source, error) {
 		}
 	}
 
-	var sources []string
-	schemeSource, newUserInput := stereoscope.ExtractSchemeSource(userInput, allSourceTags()...)
-	if schemeSource != "" {
-		sources = []string{schemeSource}
-		userInput = newUserInput
+	// prioritize explicitly specified sources from --from flag
+	sources := config.Sources
+	if len(sources) == 0 {
+		// fallback to extracting from scheme if --from not specified (for backward compatibility)
+		schemeSource, newUserInput := stereoscope.ExtractSchemeSource(userInput, allSourceTags()...)
+		if schemeSource != "" {
+			sources = []string{schemeSource}
+			userInput = newUserInput
+		}
 	}
 
 	return syft.GetSource(context.Background(), userInput, syft.DefaultGetSourceConfig().

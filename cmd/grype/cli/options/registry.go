@@ -2,8 +2,10 @@ package options
 
 import (
 	"os"
+	"strings"
 
 	"github.com/anchore/clio"
+	"github.com/anchore/grype/internal/log"
 	"github.com/anchore/stereoscope/pkg/image"
 )
 
@@ -21,7 +23,7 @@ type RegistryCredentials struct {
 type registry struct {
 	InsecureSkipTLSVerify bool                  `yaml:"insecure-skip-tls-verify" json:"insecure-skip-tls-verify" mapstructure:"insecure-skip-tls-verify"`
 	InsecureUseHTTP       bool                  `yaml:"insecure-use-http" json:"insecure-use-http" mapstructure:"insecure-use-http"`
-	Auth                  []RegistryCredentials `yaml:"auth" json:"auth" mapstructure:"auth"`
+	Auth                  []RegistryCredentials `yaml:"auth" json:"auth,omitempty" mapstructure:"auth"`
 	CACert                string                `yaml:"ca-cert" json:"ca-cert" mapstructure:"ca-cert"`
 }
 
@@ -53,6 +55,20 @@ func (cfg *registry) PostLoad() error {
 			},
 		}, cfg.Auth...)
 	}
+
+	// these flags may be picked up from a config file or environment variable without the
+	// user realizing, so surfacing them makes unprotected registry traffic visible in CI/CD output
+	var insecureFlags []string
+	if cfg.InsecureSkipTLSVerify {
+		insecureFlags = append(insecureFlags, "insecure-skip-tls-verify")
+	}
+	if cfg.InsecureUseHTTP {
+		insecureFlags = append(insecureFlags, "insecure-use-http")
+	}
+	if len(insecureFlags) > 0 {
+		log.Warnf("registry communication is insecure: %s enabled", strings.Join(insecureFlags, ", "))
+	}
+
 	return nil
 }
 
@@ -82,9 +98,9 @@ func (cfg *registry) ToOptions() *image.RegistryOptions {
 	for i, a := range cfg.Auth {
 		auth[i] = image.RegistryCredentials{
 			Authority:  a.Authority,
-			Username:   a.Username.String(),
-			Password:   a.Password.String(),
-			Token:      a.Token.String(),
+			Username:   string(a.Username),
+			Password:   string(a.Password),
+			Token:      string(a.Token),
 			ClientCert: a.TLSCert,
 			ClientKey:  a.TLSKey,
 		}

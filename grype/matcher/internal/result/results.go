@@ -5,6 +5,7 @@ import (
 
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
+	"github.com/anchore/grype/grype/search"
 	"github.com/anchore/grype/grype/vulnerability"
 	"github.com/anchore/grype/internal/log"
 )
@@ -29,44 +30,42 @@ type Result struct {
 
 type Set map[string][]Result
 
-func unionIntoResult(existing []Result) Result {
-	var merged Result
-	for _, r := range existing {
-		if merged.ID == "" {
-			merged.ID = r.ID
-			merged.Package = r.Package
+// ToMatches converts the set into matches, one per finding.
+//
+// Each record contributes a match carrying only the details that describe *that* record. Records
+// that turn out to be the same finding -- same vulnerability, same source, same package -- are then
+// folded together by match.Matches, which unions their fixed-in versions and details. Attaching the
+// whole set's details to every match instead would make each duplicate claim the others' evidence.
+func (s Set) ToMatches() []match.Match {
+	out := match.NewMatches()
+
+	for _, results := range s {
+		for _, r := range results {
+			if r.Package == nil {
+				continue // skip results without a package
+			}
+			for _, v := range r.Vulnerabilities {
+				out.Add(match.Match{
+					Vulnerability: v,
+					Package:       *r.Package,
+					Details:       r.Details,
+				})
+			}
 		}
-		merged.Vulnerabilities = append(merged.Vulnerabilities, r.Vulnerabilities...)
-		merged.Details = append(merged.Details, r.Details...)
 	}
-	merged.Details = NewMatchDetailsSet(merged.Details...).ToSlice()
-	return merged
+
+	// deterministic output order (map iteration above is not ordered)
+	return out.Sorted()
 }
 
-func (s Set) ToMatches() []match.Match {
-	var out []match.Match
+// Vulnerabilities returns a flattened slice of all vulnerabilities in the set
+func (s Set) Vulnerabilities() []vulnerability.Vulnerability {
+	var out []vulnerability.Vulnerability
 	for _, results := range s {
-		merged := unionIntoResult(results)
-
-		if len(merged.Vulnerabilities) == 0 {
-			continue
-		}
-
-		if merged.Package == nil {
-			continue // skip results without a package
-		}
-
-		for _, vv := range merged.Vulnerabilities {
-			out = append(out,
-				match.Match{
-					Vulnerability: vv,
-					Package:       *merged.Package,
-					Details:       merged.Details,
-				},
-			)
+		for _, r := range results {
+			out = append(out, r.Vulnerabilities...)
 		}
 	}
-
 	return out
 }
 
@@ -256,13 +255,29 @@ func (s Set) Update(incoming Set, shouldUpdate func(existing Result, incoming Re
 	return out
 }
 
+// Map returns a new Set with fn applied to a copy of every result. Because the copy is shallow, fn
+// must not mutate the elements of a slice field (e.g. Vulnerabilities, Details) in place — replace the
+// whole slice instead — otherwise it will corrupt the source set's shared backing arrays.
+func (s Set) Map(fn func(r *Result)) Set {
+	out := make(Set, len(s))
+	for id, results := range s {
+		updated := make([]Result, len(results))
+		for i, r := range results {
+			fn(&r)
+			updated[i] = r
+		}
+		out[id] = updated
+	}
+	return out
+}
+
 func (s Set) Filter(criteria ...vulnerability.Criteria) Set {
 	out := Set{}
 	for id, results := range s {
 		var filteredResults []Result
 
 		for _, result := range results {
-			vulns, err := filterVulns(result.Vulnerabilities, criteria)
+			vulns, details, err := filterVulns(result.Vulnerabilities, result.Details, criteria)
 			if err != nil {
 				log.WithFields("vulnerability", result.ID, "error", err).Debug("failed to filter vulns")
 				// if there was an error filtering vulnerabilities, keep them all
@@ -275,7 +290,8 @@ func (s Set) Filter(criteria ...vulnerability.Criteria) Set {
 			filteredResults = append(filteredResults, Result{
 				ID:              result.ID,
 				Vulnerabilities: vulns,
-				Details:         result.Details,
+				Details:         details,
+				Package:         result.Package,
 			})
 		}
 
@@ -288,21 +304,51 @@ func (s Set) Filter(criteria ...vulnerability.Criteria) Set {
 	return out
 }
 
-func filterVulns(vulnerabilities []vulnerability.Vulnerability, criteria []vulnerability.Criteria) ([]vulnerability.Vulnerability, error) {
+func filterVulns(vulnerabilities []vulnerability.Vulnerability, details match.Details, criteria []vulnerability.Criteria) ([]vulnerability.Vulnerability, match.Details, error) {
 	var out []vulnerability.Vulnerability
 nextVulnerability:
 	for _, v := range vulnerabilities {
 		for _, c := range criteria {
 			matches, dropReason, err := c.MatchesVulnerability(v)
 			if err != nil {
-				return nil, err
+				return nil, details, err
 			}
 			if !matches {
 				vulnerability.LogDropped(v.ID, "filterVulns", dropReason, c)
 				continue nextVulnerability
 			}
+
+			if versionCriteria, ok := c.(*search.VersionCriteria); ok {
+				// version info needs to be captured when applicable, until there is a better audit mechanism
+				details = patchDetailVersion(details, versionCriteria.Version.Raw)
+			}
 		}
 		out = append(out, v)
 	}
-	return out, nil
+	return out, details, nil
+}
+
+// patchDetailVersion fills in the searched-by package version on match details that are missing it.
+func patchDetailVersion(details match.Details, version string) match.Details {
+	for i := range details {
+		d := &details[i]
+		switch sb := d.SearchedBy.(type) {
+		case match.DistroParameters:
+			if sb.Package.Version == "" {
+				sb.Package.Version = version
+				d.SearchedBy = sb
+			}
+		case match.EcosystemParameters:
+			if sb.Package.Version == "" {
+				sb.Package.Version = version
+				d.SearchedBy = sb
+			}
+		case match.CPEParameters:
+			if sb.Package.Version == "" {
+				sb.Package.Version = version
+				d.SearchedBy = sb
+			}
+		}
+	}
+	return details
 }

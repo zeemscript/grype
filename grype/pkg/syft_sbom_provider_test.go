@@ -22,12 +22,12 @@ func TestParseSyftJSON(t *testing.T) {
 
 	tests := []struct {
 		Fixture  string
-		Packages []Package
+		Packages []*Package
 		Context  Context
 	}{
 		{
-			Fixture: "test-fixtures/syft-multiple-ecosystems.json",
-			Packages: []Package{
+			Fixture: "testdata/syft-multiple-ecosystems.json",
+			Packages: []*Package{
 				{
 					Name:    "alpine-baselayout",
 					Version: "3.2.0-r6",
@@ -52,6 +52,7 @@ func TestParseSyftJSON(t *testing.T) {
 						},
 					},
 					Metadata: ApkMetadata{
+						Arch: "x86_64",
 						Files: []ApkFileRecord{
 							{Path: "/dev"},
 							{Path: "/dev/pts"},
@@ -270,7 +271,7 @@ func TestParseSyftJSON(t *testing.T) {
 
 func TestParseSyftJSON_BadCPEs(t *testing.T) {
 	applyChannel := getDistroChannelApplier(testFixChannels())
-	pkgs, _, _, err := syftSBOMProvider("test-fixtures/syft-java-bad-cpes.json", ProviderConfig{}, applyChannel)
+	pkgs, _, _, err := syftSBOMProvider("testdata/syft-java-bad-cpes.json", ProviderConfig{}, applyChannel)
 	assert.NoError(t, err)
 	assert.Len(t, pkgs, 1)
 }
@@ -279,11 +280,11 @@ func TestParseSyftJSON_BadCPEs(t *testing.T) {
 // and package IDs are removed so that the test case variable isn't unwieldingly huge.
 var springImageTestCase = struct {
 	Fixture  string
-	Packages []Package
+	Packages []*Package
 	Context  Context
 }{
-	Fixture: "test-fixtures/syft-spring.json",
-	Packages: []Package{
+	Fixture: "testdata/syft-spring.json",
+	Packages: []*Package{
 		{
 			Name:    "charsets",
 			Version: "",
@@ -362,7 +363,7 @@ func Test_PurlList(t *testing.T) {
 	}{
 		{
 			name:      "takes multiple purls",
-			userInput: "purl:test-fixtures/purl/valid-purl.txt",
+			userInput: "purl:testdata/purl/valid-purl.txt",
 			wantContext: Context{
 				Distro: &distro.Distro{
 					Type:    "debian",
@@ -371,7 +372,7 @@ func Test_PurlList(t *testing.T) {
 				},
 				Source: &source.Description{
 					Metadata: SBOMFileMetadata{
-						Path: "test-fixtures/purl/valid-purl.txt",
+						Path: "testdata/purl/valid-purl.txt",
 					},
 				},
 			},
@@ -414,7 +415,7 @@ func Test_PurlList(t *testing.T) {
 		},
 		{
 			name:      "infer context when distro is present for multiple similar purls",
-			userInput: "purl:test-fixtures/purl/homogeneous-os.txt",
+			userInput: "purl:testdata/purl/homogeneous-os.txt",
 			wantContext: Context{
 				Distro: &distro.Distro{
 					Type:    "alpine",
@@ -423,52 +424,56 @@ func Test_PurlList(t *testing.T) {
 				},
 				Source: &source.Description{
 					Metadata: SBOMFileMetadata{
-						Path: "test-fixtures/purl/homogeneous-os.txt",
+						Path: "testdata/purl/homogeneous-os.txt",
 					},
 				},
 			},
 			wantPkgs: []Package{
 				{
-					Name:    "openssl",
-					Version: "3.2.1",
-					Type:    pkg.ApkPkg,
-					PURL:    "pkg:apk/openssl@3.2.1?arch=aarch64&distro=alpine-3.20.3",
-					Distro:  &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Name:     "openssl",
+					Version:  "3.2.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/openssl@3.2.1?arch=aarch64&distro=alpine-3.20.3",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
 				},
 				{
-					Name:    "curl",
-					Version: "7.61.1",
-					Type:    pkg.ApkPkg,
-					PURL:    "pkg:apk/curl@7.61.1?arch=aarch64&distro=alpine-3.20.3",
-					Distro:  &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Name:     "curl",
+					Version:  "7.61.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/curl@7.61.1?arch=aarch64&distro=alpine-3.20.3",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
 				},
 			},
 		},
 		{
 			name:      "different distro info in purls does not infer context",
-			userInput: "purl:test-fixtures/purl/different-os.txt",
+			userInput: "purl:testdata/purl/different-os.txt",
 			wantContext: Context{
 				// important: no distro info inferred
 				Source: &source.Description{
 					Metadata: SBOMFileMetadata{
-						Path: "test-fixtures/purl/different-os.txt",
+						Path: "testdata/purl/different-os.txt",
 					},
 				},
 			},
 			wantPkgs: []Package{
 				{
-					Name:    "openssl",
-					Version: "3.2.1",
-					Type:    pkg.ApkPkg,
-					PURL:    "pkg:apk/openssl@3.2.1?arch=aarch64&distro=alpine-3.20.3",
-					Distro:  &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Name:     "openssl",
+					Version:  "3.2.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/openssl@3.2.1?arch=aarch64&distro=alpine-3.20.3",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.3", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
 				},
 				{
-					Name:    "curl",
-					Version: "7.61.1",
-					Type:    pkg.ApkPkg,
-					PURL:    "pkg:apk/curl@7.61.1?arch=aarch64&distro=alpine-3.20.2",
-					Distro:  &distro.Distro{Type: distro.Alpine, Version: "3.20.2", IDLike: []string{"alpine"}},
+					Name:     "curl",
+					Version:  "7.61.1",
+					Type:     pkg.ApkPkg,
+					PURL:     "pkg:apk/curl@7.61.1?arch=aarch64&distro=alpine-3.20.2",
+					Distro:   &distro.Distro{Type: distro.Alpine, Version: "3.20.2", IDLike: []string{"alpine"}},
+					Metadata: ApkMetadata{Files: []ApkFileRecord{}, Arch: "aarch64"},
 				},
 			},
 		},
@@ -484,12 +489,12 @@ func Test_PurlList(t *testing.T) {
 		},
 		{
 			name:      "fails for empty purl file",
-			userInput: "purl:test-fixtures/purl/empty.json",
+			userInput: "purl:testdata/purl/empty.json",
 			wantErr:   require.Error,
 		},
 		{
 			name:      "fails on invalid purl in file",
-			userInput: "purl:test-fixtures/purl/invalid-purl.txt",
+			userInput: "purl:testdata/purl/invalid-purl.txt",
 			wantErr:   require.Error,
 		},
 		{
@@ -501,11 +506,11 @@ func Test_PurlList(t *testing.T) {
 					},
 				},
 			},
-			userInput: "purl:test-fixtures/purl/valid-rhel-9.txt",
+			userInput: "purl:testdata/purl/valid-rhel-9.txt",
 			wantContext: Context{
 				Source: &source.Description{
 					Metadata: SBOMFileMetadata{
-						Path: "test-fixtures/purl/valid-rhel-9.txt",
+						Path: "testdata/purl/valid-rhel-9.txt",
 					},
 				},
 				Distro: &distro.Distro{
@@ -533,11 +538,11 @@ func Test_PurlList(t *testing.T) {
 					},
 				},
 			},
-			userInput: "purl:test-fixtures/purl/valid-rhel-9+eus.txt",
+			userInput: "purl:testdata/purl/valid-rhel-9+eus.txt",
 			wantContext: Context{
 				Source: &source.Description{
 					Metadata: SBOMFileMetadata{
-						Path: "test-fixtures/purl/valid-rhel-9+eus.txt",
+						Path: "testdata/purl/valid-rhel-9+eus.txt",
 					},
 				},
 				Distro: &distro.Distro{

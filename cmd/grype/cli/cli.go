@@ -71,14 +71,14 @@ func SetupConfig(id clio.Identification) *clio.SetupConfig {
 				redact.Set(state.RedactStore)
 
 				log.Set(state.Logger)
-				syft.SetLogger(state.Logger)
-				stereoscope.SetLogger(state.Logger)
+				syft.SetLogger(state.Logger.Nested("from", "syft"))
+				stereoscope.SetLogger(state.Logger.Nested("from", "stereoscope"))
 
 				return nil
 			},
 		).
 		WithPostRuns(func(_ *clio.State, _ error) {
-			stereoscope.Cleanup()
+			stereoscope.Cleanup() //nolint:staticcheck
 		}).
 		WithMapExitCode(func(err error) int {
 			// return exit code 2 to indicate when a vulnerability severity is discovered

@@ -19,6 +19,8 @@ func TestOperatingSystemStore_ResolveOperatingSystem(t *testing.T) {
 
 	ubuntu2004 := &OperatingSystem{Name: "ubuntu", ReleaseID: "ubuntu", MajorVersion: "20", MinorVersion: "04", LabelVersion: "focal"}
 	ubuntu2010 := &OperatingSystem{Name: "ubuntu", MajorVersion: "20", MinorVersion: "10", LabelVersion: "groovy"}
+	ubuntu1604 := &OperatingSystem{Name: "ubuntu", ReleaseID: "ubuntu", MajorVersion: "16", MinorVersion: "04", LabelVersion: "xenial"}
+	ubuntu1604esm := &OperatingSystem{Name: "ubuntu", ReleaseID: "ubuntu", MajorVersion: "16", MinorVersion: "04", LabelVersion: "xenial", Channel: "esm"}
 	rhel8 := &OperatingSystem{Name: "rhel", ReleaseID: "rhel", MajorVersion: "8"}
 	rhel81 := &OperatingSystem{Name: "rhel", ReleaseID: "rhel", MajorVersion: "8", MinorVersion: "1"}
 	debian10 := &OperatingSystem{Name: "debian", ReleaseID: "debian", MajorVersion: "10"}
@@ -29,7 +31,7 @@ func TestOperatingSystemStore_ResolveOperatingSystem(t *testing.T) {
 	debianUnstable := &OperatingSystem{Name: "debian", ReleaseID: "debian", LabelVersion: "unstable"}
 	debian7 := &OperatingSystem{Name: "debian", ReleaseID: "debian", MajorVersion: "7", LabelVersion: "wheezy"}
 	wolfi := &OperatingSystem{Name: "wolfi", ReleaseID: "wolfi", MajorVersion: "20230201"}
-	arch := &OperatingSystem{Name: "arch", ReleaseID: "arch", MajorVersion: "20241110", MinorVersion: "0"}
+	arch := &OperatingSystem{Name: "archlinux", ReleaseID: "arch", MajorVersion: "20241110", MinorVersion: "0"}
 	oracle5 := &OperatingSystem{Name: "oracle", ReleaseID: "ol", MajorVersion: "5"}
 	oracle6 := &OperatingSystem{Name: "oracle", ReleaseID: "ol", MajorVersion: "6"}
 	amazon2 := &OperatingSystem{Name: "amazon", ReleaseID: "amzn", MajorVersion: "2"}
@@ -40,6 +42,8 @@ func TestOperatingSystemStore_ResolveOperatingSystem(t *testing.T) {
 	operatingSystems := []*OperatingSystem{
 		ubuntu2004,
 		ubuntu2010,
+		ubuntu1604,
+		ubuntu1604esm,
 		rhel8,
 		rhel81,
 		debian10,
@@ -74,6 +78,25 @@ func TestOperatingSystemStore_ResolveOperatingSystem(t *testing.T) {
 				MinorVersion: "04",
 			},
 			expected: []OperatingSystem{*ubuntu2004},
+		},
+		{
+			name: "base ubuntu query returns only the vanilla (non-esm) channel row",
+			os: OSSpecifier{
+				Name:         "ubuntu",
+				MajorVersion: "16",
+				MinorVersion: "04",
+			},
+			expected: []OperatingSystem{*ubuntu1604}, // important! the +esm row is NOT returned
+		},
+		{
+			name: "ubuntu esm channel query returns only the esm row",
+			os: OSSpecifier{
+				Name:         "ubuntu",
+				MajorVersion: "16",
+				MinorVersion: "04",
+				Channel:      "esm",
+			},
+			expected: []OperatingSystem{*ubuntu1604esm}, // important! the base row is NOT returned
 		},
 		{
 			name: "specific distro with major and minor version (missing left padding)",
@@ -313,6 +336,53 @@ func TestOperatingSystemStore_ResolveOperatingSystem(t *testing.T) {
 				Name: "minimos",
 			},
 			expected: []OperatingSystem{*minimos},
+		},
+		{
+			name: "nonexistent minor version falls back to major by default",
+			os: OSSpecifier{
+				Name:         "alpine",
+				MajorVersion: "3",
+				MinorVersion: "99", // doesn't exist, should fall back to 3.18
+			},
+			expected: []OperatingSystem{*alpine318},
+		},
+		{
+			name: "nonexistent minor version with DisableFallback returns nothing",
+			os: OSSpecifier{
+				Name:            "alpine",
+				MajorVersion:    "3",
+				MinorVersion:    "99", // doesn't exist
+				DisableFallback: true, // should NOT fall back
+			},
+			expected: nil,
+		},
+		{
+			name: "major-only distro with DisableFallback finds exact match (Debian EOL lookup)",
+			os: OSSpecifier{
+				Name:            "debian",
+				MajorVersion:    "10",
+				MinorVersion:    "", // Debian uses major-only versions
+				DisableFallback: true,
+			},
+			expected: []OperatingSystem{*debian10},
+		},
+		{
+			name: "RHEL major-only lookup finds major-only record (vuln matching)",
+			os: OSSpecifier{
+				Name:         "rhel",
+				MajorVersion: "8",
+				MinorVersion: "", // empty minor should find rhel8 directly
+			},
+			expected: []OperatingSystem{*rhel8},
+		},
+		{
+			name: "RHEL nonexistent minor falls back to major-only record (vuln matching)",
+			os: OSSpecifier{
+				Name:         "rhel",
+				MajorVersion: "8",
+				MinorVersion: "5", // 8.5 doesn't exist, should fall back to 8
+			},
+			expected: []OperatingSystem{*rhel8},
 		},
 	}
 

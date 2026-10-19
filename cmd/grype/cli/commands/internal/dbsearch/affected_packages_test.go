@@ -51,7 +51,7 @@ func TestAffectedPackageTableRowMarshalJSON(t *testing.T) {
 		},
 		AffectedPackageInfo: AffectedPackageInfo{
 			Package:   &Package{Name: "pkg1", Ecosystem: "ecosystem1"},
-			CPE:       &CPE{Part: "a", Vendor: "vendor1", Product: "product1"},
+			CPE:       &CPE{Part: "a", Vendor: "vendor1:2:3", Product: "product1/subproduct"},
 			Namespace: "namespace1",
 			Detail: v6.PackageBlob{
 				CVEs: []string{"CVE-1234-5678"},
@@ -121,7 +121,7 @@ func TestAffectedPackageTableRowMarshalJSON(t *testing.T) {
     "name": "pkg1",
     "ecosystem": "ecosystem1"
   },
-  "cpe": "cpe:2.3:a:vendor1:product1:*:*:*:*:*:*:*:*",
+  "cpe": "cpe:2.3:a:vendor1\\:2\\:3:product1\\/subproduct:*:*:*:*:*:*:*:*",
   "namespace": "namespace1",
   "detail": {
     "cves": [
@@ -898,6 +898,11 @@ func (m *affectedMockReader) GetEpss(cve string) ([]v6.EpssHandle, error) {
 func (m *affectedMockReader) GetCWEs(cve string) ([]v6.CWEHandle, error) {
 	args := m.Called(cve)
 	return args.Get(0).([]v6.CWEHandle), args.Error(1)
+}
+
+func (m *affectedMockReader) GetSsvcs(cve string) ([]v6.SsvcHandle, error) {
+	args := m.Called(cve)
+	return args.Get(0).([]v6.SsvcHandle), args.Error(1)
 }
 
 func ptr[T any](t T) *T {

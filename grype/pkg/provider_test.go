@@ -1,14 +1,18 @@
 package pkg
 
 import (
+	"os"
+	"runtime"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/anchore/grype/grype/distro"
 	"github.com/anchore/grype/grype/version"
+	"github.com/anchore/grype/internal/log"
 	"github.com/anchore/stereoscope/pkg/imagetest"
 	"github.com/anchore/syft/syft"
 	"github.com/anchore/syft/syft/cataloging"
@@ -25,31 +29,31 @@ func TestProviderLocationExcludes(t *testing.T) {
 	}{
 		{
 			name:     "exclude everything",
-			fixture:  "test-fixtures/syft-spring.json",
+			fixture:  "testdata/syft-spring.json",
 			excludes: []string{"**"},
 			expected: []string{},
 		},
 		{
 			name:     "exclude specific real path match",
-			fixture:  "test-fixtures/syft-spring.json",
+			fixture:  "testdata/syft-spring.json",
 			excludes: []string{"**/tomcat*.jar"},
 			expected: []string{"charsets"},
 		},
 		{
 			name:     "include everything with no match",
-			fixture:  "test-fixtures/syft-spring.json",
+			fixture:  "testdata/syft-spring.json",
 			excludes: []string{"**/asdf*.jar"},
 			expected: []string{"charsets", "tomcat-embed-el"},
 		},
 		{
 			name:     "include everything with no excludes",
-			fixture:  "test-fixtures/syft-spring.json",
+			fixture:  "testdata/syft-spring.json",
 			excludes: []string{},
 			expected: []string{"charsets", "tomcat-embed-el"},
 		},
 		{
 			name:     "exclusions must not hide parsing error",
-			fixture:  "test-fixtures/bad-sbom.json",
+			fixture:  "testdata/bad-sbom.json",
 			excludes: []string{"**/some-glob/*"},
 			wantErr:  assert.Error,
 		},
@@ -76,7 +80,51 @@ func TestProviderLocationExcludes(t *testing.T) {
 			}
 
 			var pkgNames []string
+			for _, pkg := range pkgs {
+				pkgNames = append(pkgNames, pkg.Name)
+			}
 
+			assert.ElementsMatch(t, pkgNames, test.expected)
+		})
+	}
+}
+
+func TestProvideFromReader(t *testing.T) {
+	tests := []struct {
+		name     string
+		fixture  string
+		expected []string
+		wantErr  assert.ErrorAssertionFunc
+	}{
+		{
+			name:     "reads packages from reader",
+			fixture:  "testdata/syft-spring.json",
+			expected: []string{"charsets", "tomcat-embed-el"},
+		},
+		{
+			name:    "invalid SBOM returns error",
+			fixture: "testdata/bad-sbom.json",
+			wantErr: assert.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f, err := os.Open(test.fixture)
+			require.NoError(t, err)
+			defer log.CloseAndLogError(f, test.fixture)
+
+			if test.wantErr == nil {
+				test.wantErr = assert.NoError
+			}
+
+			pkgs, _, _, err := ProvideFromReader(f, ProviderConfig{})
+			test.wantErr(t, err)
+			if err != nil {
+				return
+			}
+
+			var pkgNames []string
 			for _, pkg := range pkgs {
 				pkgNames = append(pkgNames, pkg.Name)
 			}
@@ -87,6 +135,10 @@ func TestProviderLocationExcludes(t *testing.T) {
 }
 
 func TestSyftLocationExcludes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// the docker image fixtures are linux images (FROM scratch), which windows docker cannot build
+		t.Skip("linux docker image fixtures are not supported on windows")
+	}
 	tests := []struct {
 		name     string
 		fixture  string
@@ -181,7 +233,7 @@ func Test_filterPackageExclusions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			var packages []Package
+			var packages []*Package
 			for _, pkg := range test.locations {
 				locations := file.NewLocationSet()
 				for _, l := range pkg {
@@ -189,7 +241,7 @@ func Test_filterPackageExclusions(t *testing.T) {
 						file.NewVirtualLocation(l, l),
 					)
 				}
-				packages = append(packages, Package{Locations: locations})
+				packages = append(packages, &Package{Locations: locations})
 			}
 			filtered, err := filterPackageExclusions(packages, test.exclusions)
 
@@ -339,6 +391,43 @@ func Test_getDistroChannelApplier(t *testing.T) {
 			distro: defaultOSGen,
 			want:   nil,
 		},
+		{
+			// a distro with no configured channels means no channel is valid for it. Leaving a
+			// requested channel in place would reach the OS specifier, match no record, and silently
+			// report zero vulnerabilities.
+			name:     "channel on a distro with no configured channels is cleared",
+			channels: distro.DefaultFixChannels(),
+			distro: func() *distro.Distro {
+				return distro.NewFromNameVersion("debian", "11+esm")
+			},
+			want: nil,
+		},
+		{
+			name:     "arbitrary channel on an unconfigured distro is cleared",
+			channels: distro.DefaultFixChannels(),
+			distro: func() *distro.Distro {
+				return distro.NewFromNameVersion("alpine", "3.20+anything")
+			},
+			want: nil,
+		},
+		{
+			// centos is not in the EUS channel's IDs, but it aliases toward RHEL data at search time,
+			// so a surviving channel here yields a partial result set rather than an obvious zero
+			name:     "eus on centos is cleared",
+			channels: distro.DefaultFixChannels(),
+			distro: func() *distro.Distro {
+				return distro.NewFromNameVersion("centos", "9+eus")
+			},
+			want: nil,
+		},
+		{
+			name:     "ubuntu esm on a codename survives",
+			channels: distro.DefaultFixChannels(),
+			distro: func() *distro.Distro {
+				return distro.NewFromNameVersion("ubuntu", "jammy+esm")
+			},
+			want: []string{"esm"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -357,11 +446,10 @@ func Test_getDistroChannelApplier(t *testing.T) {
 
 func Test_applyChannelsToDistro(t *testing.T) {
 	tests := []struct {
-		name             string
-		distro           func() *distro.Distro
-		channels         distro.FixChannels
-		expectedResult   []string
-		expectedModified bool
+		name           string
+		distro         func() *distro.Distro
+		channels       distro.FixChannels
+		expectedResult []string
 	}{
 		{
 			name:   "always enabled channel adds new channel",
@@ -372,8 +460,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelAlwaysEnabled,
 				},
 			},
-			expectedResult:   []string{"eus"},
-			expectedModified: true,
+			expectedResult: []string{"eus"},
 		},
 		{
 			name: "always enabled channel keeps existing channel",
@@ -388,8 +475,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelAlwaysEnabled,
 				},
 			},
-			expectedResult:   []string{"eus"},
-			expectedModified: false,
+			expectedResult: []string{"eus"},
 		},
 		{
 			name: "conditionally enabled channel keeps existing channel",
@@ -404,8 +490,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelConditionallyEnabled,
 				},
 			},
-			expectedResult:   []string{"eus"},
-			expectedModified: false,
+			expectedResult: []string{"eus"},
 		},
 		{
 			name:   "conditionally enabled channel does not add missing channel",
@@ -416,8 +501,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelConditionallyEnabled,
 				},
 			},
-			expectedResult:   []string{},
-			expectedModified: false,
+			expectedResult: []string{},
 		},
 		{
 			name: "never enabled channel removes existing channel",
@@ -432,8 +516,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelNeverEnabled,
 				},
 			},
-			expectedResult:   []string{},
-			expectedModified: true,
+			expectedResult: []string{},
 		},
 		{
 			name:   "never enabled channel with no existing channel",
@@ -444,8 +527,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelNeverEnabled,
 				},
 			},
-			expectedResult:   []string{},
-			expectedModified: false,
+			expectedResult: []string{},
 		},
 		{
 			name:   "empty channel name is skipped",
@@ -460,8 +542,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelAlwaysEnabled,
 				},
 			},
-			expectedResult:   []string{"eus"},
-			expectedModified: true,
+			expectedResult: []string{"eus"},
 		},
 		{
 			name:   "version constraint allows channel",
@@ -473,8 +554,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Versions: version.MustGetConstraint(">= 8.0", version.SemanticFormat),
 				},
 			},
-			expectedResult:   []string{"eus"},
-			expectedModified: true,
+			expectedResult: []string{"eus"},
 		},
 		{
 			name:   "version constraint blocks channel",
@@ -486,8 +566,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Versions: version.MustGetConstraint(">= 8.0", version.SemanticFormat),
 				},
 			},
-			expectedResult:   []string{},
-			expectedModified: false,
+			expectedResult: []string{},
 		},
 		{
 			name: "multiple channels with different behaviors",
@@ -510,8 +589,7 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Apply: distro.ChannelNeverEnabled,
 				},
 			},
-			expectedResult:   []string{"eus", "main"},
-			expectedModified: true,
+			expectedResult: []string{"eus", "main"},
 		},
 		{
 			name:   "invalid version string defaults to allowing channel",
@@ -523,8 +601,68 @@ func Test_applyChannelsToDistro(t *testing.T) {
 					Versions: version.MustGetConstraint(">= 8.0", version.SemanticFormat),
 				},
 			},
-			expectedResult:   []string{"eus"},
-			expectedModified: true,
+			expectedResult: []string{"eus"},
+		},
+		{
+			// channel names are matched case-insensitively, consistent with the matchers; the
+			// configured spelling wins so the search and the output both see "eus"
+			name:   "requested channel matches configured name regardless of case",
+			distro: func() *distro.Distro { return distro.NewFromNameVersion("rhel", "9+EUS") },
+			channels: distro.FixChannels{
+				{
+					Name:  "eus",
+					Apply: distro.ChannelConditionallyEnabled,
+				},
+			},
+			expectedResult: []string{"eus"},
+		},
+		{
+			name:   "requested channel with surrounding whitespace is matched",
+			distro: func() *distro.Distro { return distro.NewFromNameVersion("rhel", "9+ eus ") },
+			channels: distro.FixChannels{
+				{
+					Name:  "eus",
+					Apply: distro.ChannelConditionallyEnabled,
+				},
+			},
+			expectedResult: []string{"eus"},
+		},
+		{
+			name:   "unrecognized channel is dropped",
+			distro: func() *distro.Distro { return distro.NewFromNameVersion("rhel", "9+bogus") },
+			channels: distro.FixChannels{
+				{
+					Name:  "eus",
+					Apply: distro.ChannelConditionallyEnabled,
+				},
+			},
+			expectedResult: []string{},
+		},
+		{
+			// a channel that is real but belongs to a different distro must not leak through
+			name:   "channel from another distro is dropped",
+			distro: func() *distro.Distro { return distro.NewFromNameVersion("ubuntu", "16.04+eus") },
+			channels: distro.FixChannels{
+				{
+					Name:  "esm",
+					Apply: distro.ChannelConditionallyEnabled,
+				},
+			},
+			expectedResult: []string{},
+		},
+		{
+			// requesting a channel outside its version window drops it, rather than passing an
+			// unsatisfiable channel into the search
+			name:   "requested channel outside the version window is dropped",
+			distro: func() *distro.Distro { return distro.NewFromNameVersion("rhel", "7+eus") },
+			channels: distro.FixChannels{
+				{
+					Name:     "eus",
+					Apply:    distro.ChannelConditionallyEnabled,
+					Versions: version.MustGetConstraint(">= 8.0", version.SemanticFormat),
+				},
+			},
+			expectedResult: []string{},
 		},
 	}
 
@@ -532,12 +670,48 @@ func Test_applyChannelsToDistro(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := tt.distro()
 
-			modified := applyChannelsToDistro(d, tt.channels)
+			applyChannelsToDistro(d, tt.channels)
 
 			if d := cmp.Diff(tt.expectedResult, d.Channels, cmpopts.EquateEmpty()); d != "" {
 				t.Errorf("applyChannelsToDistro() mismatch (-want +got):\n%s", d)
 			}
-			assert.Equal(t, tt.expectedModified, modified)
+		})
+	}
+}
+
+func Test_shouldWarnMissingGoSymbols(t *testing.T) {
+	goBinaryWithSymbols := Package{Metadata: GolangBinMetadata{Symbols: map[string][]string{"main": {"main"}}}}
+	goBinaryWithoutSymbols := Package{Metadata: GolangBinMetadata{}}
+	nonGoPackage := Package{}
+
+	tests := []struct {
+		name string
+		pkgs []Package
+		want bool
+	}{
+		{
+			name: "no packages",
+			want: false,
+		},
+		{
+			name: "no go binary packages",
+			pkgs: []Package{nonGoPackage},
+			want: false,
+		},
+		{
+			name: "at least one go binary carries symbols does not warn",
+			pkgs: []Package{goBinaryWithoutSymbols, goBinaryWithSymbols, nonGoPackage},
+			want: false,
+		},
+		{
+			name: "go binaries present but none carry symbols warns",
+			pkgs: []Package{goBinaryWithoutSymbols, goBinaryWithoutSymbols, nonGoPackage},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, shouldWarnMissingGoSymbols(tt.pkgs))
 		})
 	}
 }
